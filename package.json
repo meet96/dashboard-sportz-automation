@@ -1,0 +1,25 @@
+{
+  "name": "dashboard-sportz-automation",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "smoke:health": "tsx scripts/smoke-health.ts"
+  },
+  "dependencies": {
+    "agenda": "^5.0.0",
+    "agendash": "^4.0.0",
+    "dotenv": "^17.3.1",
+    "express": "^4.19.2",
+    "express-basic-auth": "^1.2.1",
+    "mongoose": "^9.3.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
