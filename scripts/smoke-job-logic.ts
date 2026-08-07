@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { decideMatchAction } from "../src/jobs/checkAndScoreMatches";
+import { decideMatchAction, decideForcedMatchAction, parseTargetRequest } from "../src/jobs/checkAndScoreMatches";
 
 function main() {
   const now = Date.now();
@@ -52,6 +52,53 @@ function main() {
   assert.strictEqual(
     decideMatchAction({ date: startedWayLongAgo, cricbuzzMatchId: "12345" }, true, now, true),
     "no-result"
+  );
+
+  // --- decideForcedMatchAction: no staleness concept at all, unlike decideMatchAction ---
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, true, false),
+    "score-cricket"
+  );
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "espn:999" }, true, false),
+    "score-football"
+  );
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, false, false),
+    "skip-not-finished"
+  );
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, true, true),
+    "no-result"
+  );
+
+  // --- parseTargetRequest: distinguishes a targeted request from the normal empty-data sweep ---
+  assert.strictEqual(parseTargetRequest(undefined), null);
+  assert.strictEqual(parseTargetRequest({}), null);
+  assert.strictEqual(parseTargetRequest({ lastRunAt: "2026-01-01", candidates: 3, results: [] }), null); // looks like leftover sweep output, not a target request
+
+  assert.deepStrictEqual(
+    parseTargetRequest({ matchId: "68a1000000000000000000aa" }),
+    { matchIds: ["68a1000000000000000000aa"], leagueCode: undefined, series: undefined }
+  );
+  assert.deepStrictEqual(
+    parseTargetRequest({ matchIds: ["68a1000000000000000000aa", "68a1000000000000000000bb"] }),
+    { matchIds: ["68a1000000000000000000aa", "68a1000000000000000000bb"], leagueCode: undefined, series: undefined }
+  );
+  // matchId and matchIds combined and deduped
+  assert.deepStrictEqual(
+    parseTargetRequest({ matchId: "68a1000000000000000000aa", matchIds: ["68a1000000000000000000aa", "68a1000000000000000000bb"] }),
+    { matchIds: ["68a1000000000000000000aa", "68a1000000000000000000bb"], leagueCode: undefined, series: undefined }
+  );
+  assert.deepStrictEqual(
+    parseTargetRequest({ leagueCode: "FANTASY11", series: "IPL2026" }),
+    { matchIds: [], leagueCode: "FANTASY11", series: "IPL2026" }
+  );
+  // leagueCode alone (no series) is still a "targeted run" per parseTargetRequest -- the
+  // both-required validation happens later in resolveTargetedMatches, reported as a not-found entry
+  assert.deepStrictEqual(
+    parseTargetRequest({ leagueCode: "FANTASY11" }),
+    { matchIds: [], leagueCode: "FANTASY11", series: undefined }
   );
 
   console.log("PASS: smoke-job-logic");

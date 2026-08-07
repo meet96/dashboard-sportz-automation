@@ -1,4 +1,5 @@
 import type { Job } from "agenda";
+import mongoose from "mongoose";
 import Match, { IMatch } from "../models/Match";
 import LeagueCode from "../models/LeagueCode";
 import { fetchCricbuzzMatchStatus } from "../lib/cricbuzzStatus";
@@ -13,9 +14,10 @@ export const JOB_NAME = "check-and-score-matches";
 const STALE_CAP_MS = 12 * 60 * 60 * 1000; // 12h past start, never reported finished -> stop auto-retrying
 // Absolute ceiling: regardless of the provider's reported status, stop retrying a match more than
 // 48h past its start time. This bounds the "finished but the scoring call throws every tick" case
-// (missing ScoringConfig, name-matching bug, provider outage) which the 12h cap above does NOT catch,
-// because that cap only fires when a match is still *not finished*. 48h leaves plenty of room for a
-// finished match that legitimately takes many hours to score successfully.
+// (missing ScoringConfig, a name-matching bug, provider outage) which the 12h cap above does NOT
+// catch, because that cap only fires when a match is still *not finished*. Only applies to the
+// recurring sweep's own candidates -- a manually targeted run (Task 1's new capability) always
+// bypasses both caps, since a human explicitly asked for that match regardless of its age.
 const ABSOLUTE_CAP_MS = 48 * 60 * 60 * 1000;
 
 export type MatchAction =
@@ -23,10 +25,11 @@ export type MatchAction =
   | "score-football"
   | "skip-not-finished"
   | "stale"
-  | "no-result";
+  | "no-result"
+  | "not-found";
 
 // Pure decision function — no I/O — so it's unit-testable in isolation from the DB/network calls
-// that determine `isFinished`/`isNoResult`/`nowMs`.
+// that determine `isFinished`/`isNoResult`/`nowMs`. Used by the recurring sweep only.
 export function decideMatchAction(
   match: { date: Date; cricbuzzMatchId?: string | null },
   isFinished: boolean,
@@ -48,6 +51,98 @@ export function decideMatchAction(
   if (isFinished) return isFootball ? "score-football" : "score-cricket";
   if (pastStale) return "stale";
   return "skip-not-finished";
+}
+
+// Same dispatch logic as decideMatchAction, but with no staleness concept at all -- used for
+// manually-targeted matches, where a human explicitly asked for this one regardless of its age.
+export function decideForcedMatchAction(
+  match: { cricbuzzMatchId?: string | null },
+  isFinished: boolean,
+  isNoResult: boolean = false
+): Exclude<MatchAction, "stale" | "not-found"> {
+  const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
+  if (isNoResult) return "no-result";
+  if (isFinished) return isFootball ? "score-football" : "score-cricket";
+  return "skip-not-finished";
+}
+
+interface TargetRequest {
+  matchIds: string[];
+  leagueCode?: string;
+  series?: string;
+}
+
+// Reads job.attrs.data (as submitted via Agendash's Create Job form or the CLI wrapper) and
+// determines whether this run is targeted. Returns null for the normal recurring-sweep case (no
+// data, or data that specifies neither ids nor a league+series pair).
+export function parseTargetRequest(data: unknown): TargetRequest | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+
+  const ids = new Set<string>();
+  if (typeof d.matchId === "string" && d.matchId.trim()) ids.add(d.matchId.trim());
+  if (Array.isArray(d.matchIds)) {
+    for (const id of d.matchIds) {
+      if (typeof id === "string" && id.trim()) ids.add(id.trim());
+    }
+  }
+
+  const leagueCode = typeof d.leagueCode === "string" && d.leagueCode.trim() ? d.leagueCode.trim() : undefined;
+  const series = typeof d.series === "string" && d.series.trim() ? d.series.trim() : undefined;
+
+  if (ids.size === 0 && !leagueCode && !series) return null;
+
+  return { matchIds: [...ids], leagueCode, series };
+}
+
+interface TargetResolution {
+  matches: IMatch[];
+  notFound: Array<{ id: string; reason: string }>;
+}
+
+// Resolves a TargetRequest into actual Match documents, bypassing every recurring-sweep filter
+// (isCompleted/noResult/date) -- a targeted run considers a match regardless of its current status.
+async function resolveTargetedMatches(target: TargetRequest): Promise<TargetResolution> {
+  const notFound: Array<{ id: string; reason: string }> = [];
+  const matchMap = new Map<string, IMatch>();
+
+  if (target.matchIds.length > 0) {
+    const validIds = target.matchIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    for (const id of target.matchIds) {
+      if (!mongoose.Types.ObjectId.isValid(id)) notFound.push({ id, reason: "invalid match id format" });
+    }
+    if (validIds.length > 0) {
+      const found = await Match.find({ _id: { $in: validIds } });
+      const foundIds = new Set(found.map((m) => String(m._id)));
+      for (const m of found) matchMap.set(String(m._id), m);
+      for (const id of validIds) {
+        if (!foundIds.has(id)) notFound.push({ id, reason: "no match found with this id" });
+      }
+    }
+  }
+
+  if (target.leagueCode || target.series) {
+    if (!target.leagueCode || !target.series) {
+      notFound.push({
+        id: `${target.leagueCode ?? "?"}/${target.series ?? "?"}`,
+        reason: "leagueCode and series must both be provided together",
+      });
+    } else {
+      const seriesMatches = await Match.find({
+        leagueCodes: target.leagueCode,
+        series: target.series,
+      });
+      if (seriesMatches.length === 0) {
+        notFound.push({
+          id: `${target.leagueCode}/${target.series}`,
+          reason: "no matches found for this leagueCode+series combination",
+        });
+      }
+      for (const m of seriesMatches) matchMap.set(String(m._id), m);
+    }
+  }
+
+  return { matches: [...matchMap.values()], notFound };
 }
 
 async function findCandidateMatches(): Promise<IMatch[]> {
@@ -93,8 +188,22 @@ async function scoreFootballMatchByType(match: IMatch) {
 
 export function defineCheckAndScoreJob(agenda: import("agenda").default) {
   agenda.define(JOB_NAME, async (job: Job) => {
-    const candidates = await findCandidateMatches();
+    // Capture the submitted data before this function overwrites job.attrs.data with results below.
+    const target = parseTargetRequest(job.attrs.data);
+    const isTargetedRun = target !== null;
+
     const runSummary: Array<{ matchId: string; matchName: string; action: MatchAction; error?: string }> = [];
+    let candidates: IMatch[];
+
+    if (isTargetedRun) {
+      const resolution = await resolveTargetedMatches(target!);
+      candidates = resolution.matches;
+      for (const nf of resolution.notFound) {
+        runSummary.push({ matchId: nf.id, matchName: "(unknown)", action: "not-found", error: nf.reason });
+      }
+    } else {
+      candidates = await findCandidateMatches();
+    }
 
     for (const match of candidates) {
       const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
@@ -116,7 +225,9 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
         continue;
       }
 
-      const action = decideMatchAction(match, isFinished, Date.now(), isNoResult);
+      const action = isTargetedRun
+        ? decideForcedMatchAction(match, isFinished, isNoResult)
+        : decideMatchAction(match, isFinished, Date.now(), isNoResult);
 
       if (action === "no-result") {
         // Terminal, but no actual play happened (abandoned/cancelled/no-result/walkover). Mark the
@@ -142,17 +253,22 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action });
       } catch (err) {
         // Roll isCompleted back to false so this match remains (or becomes again) a candidate
-        // on the next tick. Without this, a transient scoring failure permanently strands the
-        // match: findCandidateMatches() filters on isCompleted: false, so it would otherwise
-        // never be retried. Safe to redo: the scoring services are idempotent (upsert-keyed by
-        // {teamId, matchId} etc.), so retrying both calls in scoreCricketMatch/
-        // scoreFootballMatchByType next tick is harmless even if one already succeeded.
+        // on the next sweep tick. Without this, a transient scoring failure permanently strands the
+        // match. Safe to redo: the scoring services are idempotent (upsert-keyed by {teamId,
+        // matchId} etc.), so retrying both calls next time is harmless even if one already
+        // succeeded. For a targeted run this simply means the operator can just re-trigger it.
         await Match.findByIdAndUpdate(match._id, { isCompleted: false });
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action, error: err instanceof Error ? err.message : String(err) });
       }
     }
 
-    job.attrs.data = { lastRunAt: new Date().toISOString(), candidates: candidates.length, results: runSummary };
+    job.attrs.data = {
+      lastRunAt: new Date().toISOString(),
+      mode: isTargetedRun ? "targeted" : "sweep",
+      requested: isTargetedRun ? { matchIds: target!.matchIds, leagueCode: target!.leagueCode, series: target!.series } : undefined,
+      candidates: candidates.length,
+      results: runSummary,
+    };
     await job.save();
   });
 }
