@@ -10,6 +10,7 @@ The `check-and-score-matches` Agenda job automatically sweeps all pending matche
 Goal:
 1. Keep the existing recurring job — runs every 30 minutes, checks and scores whatever's pending. (Already built.)
 2. Add the ability to trigger scoring **on demand**, from Agendash, for a specific match, a few matches, or an entire series — with the job picking up the request and acting on it in the background. No separate endpoint, no code deploy per use.
+3. Add a CLI convenience wrapper so triggering doesn't require opening the browser and hand-typing JSON each time — pass a match ID (or a few, or a league+series) as command-line arguments instead.
 
 ## Approach
 
@@ -36,8 +37,24 @@ All three may be combined in one request; the resulting match ID sets are unione
 - **Not finished yet:** if the provider still reports a targeted match live/upcoming, the run reports `skip-not-finished` for it rather than scoring garbage — forcing doesn't fabricate a result that doesn't exist yet. Other matches in the same targeted batch are unaffected.
 - **Result visibility:** the job's `data` after a targeted run includes a `mode: "targeted"` marker and what was requested (ids and/or leagueCode+series), alongside the same `results` summary shape the sweep already produces, so Agendash's job-detail view shows what happened per requested match.
 
+## CLI wrapper (`scripts/trigger-scoring.ts`)
+
+A small script that automates exactly what a human would do in Agendash's "Create Job" form — no new backend endpoint, it calls the *same* Agendash create-job API (`POST /admin/jobs/api/jobs/create`, basic-auth via `AGENDASH_USER`/`AGENDASH_PASSWORD` already in `.env`) that the UI form itself calls, verified working earlier in this design process.
+
+**Usage:**
+```bash
+npx tsx scripts/trigger-scoring.ts --matchId <id>
+npx tsx scripts/trigger-scoring.ts --matchIds <id1>,<id2>,<id3>
+npx tsx scripts/trigger-scoring.ts --leagueCode FANTASY11 --series IPL2026
+npx tsx scripts/trigger-scoring.ts --url https://<railway-url> --matchId <id>   # against a deployed instance instead of localhost
+```
+
+Validation mirrors the job handler's own: at least one of `--matchId`/`--matchIds` must be given, or both `--leagueCode` and `--series` together (one without the other is a usage error, caught before any request is sent). `--url` defaults to `http://localhost:3001`.
+
+**Behavior:** posts the create-job request with `jobSchedule: "now"` (no `jobRepeatEvery`, so it's always a one-time run, never a duplicate recurring job) and the resolved `jobData`. Then polls the `agendaJobs` collection directly (the script already needs `MONGODB_URI` from `.env`, same as every other script in this repo) for the newest one-time job named `check-and-score-matches` (`repeatInterval` absent, distinguishing it from the recurring sweep) created after the request was sent, until it has a `lastFinishedAt`, and prints its result (`data.results`) to the terminal — so the operator sees the outcome (scored / no-result / skip-not-finished / not-found / error) without switching to the browser. Polls roughly once per second for up to 30 seconds; if it times out without finding a finished job, it says so and points at Agendash instead of hanging forever.
+
 ## Out of scope
 
-- No new HTTP endpoint — Agendash's existing "Create Job" UI is the only trigger surface, per what was asked.
+- No new HTTP endpoint on the automation service itself — both the browser UI and the CLI wrapper go through Agendash's existing create-job API.
 - No change to the recurring sweep's guardrails or schedule.
-- No UI changes to Agendash itself (it's a third-party package) — the operator types raw JSON into its existing generic "Create Job" form.
+- No UI changes to Agendash itself (it's a third-party package).
