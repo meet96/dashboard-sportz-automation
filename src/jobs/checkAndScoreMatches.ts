@@ -110,6 +110,13 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
         }
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action });
       } catch (err) {
+        // Roll isCompleted back to false so this match remains (or becomes again) a candidate
+        // on the next tick. Without this, a transient scoring failure permanently strands the
+        // match: findCandidateMatches() filters on isCompleted: false, so it would otherwise
+        // never be retried. Safe to redo: the scoring services are idempotent (upsert-keyed by
+        // {teamId, matchId} etc.), so retrying both calls in scoreCricketMatch/
+        // scoreFootballMatchByType next tick is harmless even if one already succeeded.
+        await Match.findByIdAndUpdate(match._id, { isCompleted: false });
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action, error: err instanceof Error ? err.message : String(err) });
       }
     }

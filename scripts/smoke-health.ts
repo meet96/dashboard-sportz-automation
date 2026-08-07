@@ -12,10 +12,6 @@ async function main() {
   assert.strictEqual(body.ok, true);
   server.close();
   console.log("PASS: smoke-health");
-  // server.ts now constructs an Agenda instance at import time, which opens its own MongoDB
-  // connection independent of the HTTP server. Nothing in this script starts/stops Agenda,
-  // so that connection is left open and keeps the process alive after the test passes.
-  process.exit(0);
 }
 
 main().catch((e) => {
