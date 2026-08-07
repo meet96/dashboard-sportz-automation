@@ -244,7 +244,7 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
       }
 
       try {
-        await Match.findByIdAndUpdate(match._id, { isCompleted: true });
+        await Match.findByIdAndUpdate(match._id, { isCompleted: true, noResult: false });
         if (action === "score-cricket") {
           await scoreCricketMatch(match);
         } else {
