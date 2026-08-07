@@ -133,9 +133,13 @@ async function main() {
   await submitJob(args);
 
   await connectDB();
-  console.log("Waiting for result...");
-  const job = await pollForResult(submittedAt);
-  await mongoose.disconnect();
+  let job: AgendaJobDoc | null;
+  try {
+    console.log("Waiting for result...");
+    job = await pollForResult(submittedAt);
+  } finally {
+    await mongoose.disconnect();
+  }
 
   if (!job) {
     console.log(
