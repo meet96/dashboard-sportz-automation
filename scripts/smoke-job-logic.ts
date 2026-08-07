@@ -101,6 +101,29 @@ function main() {
     { matchIds: [], leagueCode: "FANTASY11", series: undefined }
   );
 
+  // Finding (live scoring): a targeted match that's live (not finished, not no-result, isLive)
+  // decides "scored-live" -- the Contest gate is checked separately by the job handler, not by
+  // this pure decision function (it has no DB access).
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, false, false, true),
+    "scored-live"
+  );
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "espn:999" }, false, false, true),
+    "scored-live"
+  );
+  // Not live and not finished -> still just skip-not-finished, unchanged from before.
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, false, false, false),
+    "skip-not-finished"
+  );
+  // Finished takes priority over live (a match reported both finished AND briefly still flagged
+  // live by a stale provider read would resolve to the authoritative finished outcome).
+  assert.strictEqual(
+    decideForcedMatchAction({ cricbuzzMatchId: "12345" }, true, false, true),
+    "score-cricket"
+  );
+
   console.log("PASS: smoke-job-logic");
 }
 

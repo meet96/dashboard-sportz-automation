@@ -9,6 +9,7 @@ import { scoreFantasy11Match } from "../services/scoreFantasy11";
 import { scoreFootballMatch } from "../services/scoreFootball";
 import { scoreFootballClassicMatchService } from "../services/scoreFootballClassic";
 import { resolveClassicScoringTargets } from "../lib/resolveClassicScoringTargets";
+import { hasActiveContestForMatch } from "../lib/hasActiveContestForMatch";
 
 export const JOB_NAME = "check-and-score-matches";
 const STALE_CAP_MS = 12 * 60 * 60 * 1000; // 12h past start, never reported finished -> stop auto-retrying
@@ -26,7 +27,9 @@ export type MatchAction =
   | "skip-not-finished"
   | "stale"
   | "no-result"
-  | "not-found";
+  | "not-found"
+  | "scored-live"
+  | "skip-no-contest";
 
 // Pure decision function — no I/O — so it's unit-testable in isolation from the DB/network calls
 // that determine `isFinished`/`isNoResult`/`nowMs`. Used by the recurring sweep only.
@@ -58,11 +61,15 @@ export function decideMatchAction(
 export function decideForcedMatchAction(
   match: { cricbuzzMatchId?: string | null },
   isFinished: boolean,
-  isNoResult: boolean = false
-): Exclude<MatchAction, "stale" | "not-found"> {
-  const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
+  isNoResult: boolean = false,
+  isLive: boolean = false
+): Exclude<MatchAction, "stale" | "not-found" | "skip-no-contest"> {
   if (isNoResult) return "no-result";
-  if (isFinished) return isFootball ? "score-football" : "score-cricket";
+  if (isFinished) {
+    const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
+    return isFootball ? "score-football" : "score-cricket";
+  }
+  if (isLive) return "scored-live";
   return "skip-not-finished";
 }
 
@@ -209,25 +216,36 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
       const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
       let isFinished = false;
       let isNoResult = false;
+      let isLive = false;
 
       try {
         if (isFootball) {
           const espnId = (match.cricbuzzMatchId ?? "").replace(/^espn:/, "");
           const status = await fetchEspnMatchStatus(espnId);
           isFinished = status.completed;
+          isLive = status.isLive;
         } else {
           const status = await fetchCricbuzzMatchStatus(String(match.cricbuzzMatchId));
           isFinished = status.isFinished;
           isNoResult = status.isNoResult;
+          isLive = status.isLive;
         }
       } catch (err) {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action: "skip-not-finished", error: `status check failed: ${err instanceof Error ? err.message : String(err)}` });
         continue;
       }
 
-      const action = isTargetedRun
-        ? decideForcedMatchAction(match, isFinished, isNoResult)
+      let action = isTargetedRun
+        ? decideForcedMatchAction(match, isFinished, isNoResult, isLive)
         : decideMatchAction(match, isFinished, Date.now(), isNoResult);
+
+      // Live scoring (targeted runs only -- the recurring sweep has no live concept) is further
+      // gated on a real Contest existing, checked only when actually needed (not on every
+      // candidate) to keep this cheap for the common finished/not-finished cases.
+      if (action === "scored-live") {
+        const hasContest = await hasActiveContestForMatch(match);
+        if (!hasContest) action = "skip-no-contest";
+      }
 
       if (action === "no-result") {
         // Terminal, but no actual play happened (abandoned/cancelled/no-result/walkover). Mark the
@@ -238,8 +256,36 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
         continue;
       }
 
-      if (action === "skip-not-finished" || action === "stale") {
+      if (action === "skip-not-finished" || action === "stale" || action === "skip-no-contest") {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action });
+        continue;
+      }
+
+      if (action === "scored-live") {
+        try {
+          if (isFootball) {
+            const leagues = await LeagueCode.find({ code: { $in: match.leagueCodes } }).lean();
+            if (leagues.some((l) => l.gameType === "football")) {
+              await scoreFootballMatch(String(match._id), { allowIncomplete: true });
+            }
+            if (leagues.some((l) => l.gameType === "classic" && (/football/i.test(l.code) || /football/i.test(l.name)))) {
+              await scoreFootballClassicMatchService(String(match._id));
+            }
+          } else {
+            const classicTargets = await resolveClassicScoringTargets(match);
+            if (classicTargets.length > 0) {
+              await scoreClassicMatch(String(match._id), { allowIncomplete: true });
+            }
+            const leagues = await LeagueCode.find({ code: { $in: match.leagueCodes } }).lean();
+            if (leagues.some((l) => l.gameType === "fantasy11" || l.gameType === "advanced")) {
+              await scoreFantasy11Match(String(match._id), { allowIncomplete: true });
+            }
+          }
+          // No isCompleted write here -- live scoring never marks a match complete.
+          runSummary.push({ matchId: String(match._id), matchName: match.matchName, action });
+        } catch (err) {
+          runSummary.push({ matchId: String(match._id), matchName: match.matchName, action, error: err instanceof Error ? err.message : String(err) });
+        }
         continue;
       }
 
