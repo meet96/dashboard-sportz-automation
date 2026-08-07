@@ -66,7 +66,7 @@ export async function startAgenda() {
   agenda = new Agenda({ db: { address: process.env.MONGODB_URI! } });
   defineCheckAndScoreJob(agenda);
   await agenda.start();
-  await agenda.every("10 minutes", JOB_NAME);
+  await agenda.every("30 minutes", JOB_NAME);
 }
 
 if (require.main === module) {
