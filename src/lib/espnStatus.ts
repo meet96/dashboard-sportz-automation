@@ -1,10 +1,12 @@
 // Verified live during design (2026-08-06) against real match id 401879301
 // (Arsenal vs Coventry City, not yet played): status.type = { state: "pre", completed: false }.
 // ESPN's `completed` boolean is the authoritative "this game is over" signal — no state-string
-// guessing needed, unlike Cricbuzz.
+// guessing needed, unlike Cricbuzz. Its `state` field cleanly distinguishes "pre" (not started),
+// "in" (live), "post" (finished) -- isLive is a direct equality check, no allowlist needed.
 export interface EspnMatchStatus {
   state: string;
   completed: boolean;
+  isLive: boolean;
 }
 
 export async function fetchEspnMatchStatus(eventId: string): Promise<EspnMatchStatus> {
@@ -21,8 +23,10 @@ export async function fetchEspnMatchStatus(eventId: string): Promise<EspnMatchSt
   const type = data.header?.competitions?.[0]?.status?.type;
   if (!type) throw new Error("ESPN response missing header.competitions[0].status.type");
 
+  const state = String(type.state ?? "");
   return {
-    state: String(type.state ?? ""),
+    state,
     completed: type.completed === true,
+    isLive: state === "in",
   };
 }
