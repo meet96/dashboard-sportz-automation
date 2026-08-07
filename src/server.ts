@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import Agenda from "agenda";
+import Agendash from "agendash";
+import basicAuth from "express-basic-auth";
 import { scoreRoutes } from "./routes/scoreRoutes";
 import { defineCheckAndScoreJob, JOB_NAME } from "./jobs/checkAndScoreMatches";
 import { connectDB } from "./db";
@@ -11,6 +13,33 @@ app.use(express.json());
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
+
+// Agendash ops UI, protected by basic auth. Mounted BEFORE scoreRoutes: scoreRoutes'
+// router applies `requireApiKey` unconditionally to every request that reaches it (it has
+// no path restriction of its own, and scoreRoutes is itself mounted at "/"), so if this were
+// registered after scoreRoutes, requests to /admin/jobs would be intercepted and rejected by
+// requireApiKey (a 401 with a JSON "Missing Authorization: Bearer <key> header" body and no
+// WWW-Authenticate header) before ever reaching basicAuth/Agendash below. Confirmed via curl
+// during manual verification.
+//
+// `agenda` (declared below) is undefined until startAgenda() resolves, so this must check it
+// at REQUEST time rather than mounting Agendash(agenda) at module scope — the latter would
+// capture `undefined` permanently (or throw) during the boot window before startAgenda()
+// finishes. See the `agenda` export below for why it can't be a module-scope const.
+app.use(
+  "/admin/jobs",
+  basicAuth({
+    users: { [process.env.AGENDASH_USER ?? "admin"]: process.env.AGENDASH_PASSWORD ?? "" },
+    challenge: true,
+  }),
+  (req, res, next) => {
+    if (!agenda) {
+      res.status(503).json({ error: "Agenda not started yet" });
+      return;
+    }
+    return Agendash(agenda)(req, res, next);
+  }
+);
 
 app.use(scoreRoutes);
 
