@@ -1,4 +1,4 @@
-# Targeted Manual Scoring Trigger via Agendash — Design
+# Manual Scoring Controls (Targeted Trigger, CLI, Pause/Resume) — Design
 
 **Date:** 2026-08-07
 **Status:** Approved, not yet implemented
@@ -11,6 +11,7 @@ Goal:
 1. Keep the existing recurring job — runs every 30 minutes, checks and scores whatever's pending. (Already built.)
 2. Add the ability to trigger scoring **on demand**, from Agendash, for a specific match, a few matches, or an entire series — with the job picking up the request and acting on it in the background. No separate endpoint, no code deploy per use.
 3. Add a CLI convenience wrapper so triggering doesn't require opening the browser and hand-typing JSON each time — pass a match ID (or a few, or a league+series) as command-line arguments instead.
+4. Add the ability to temporarily pause and later resume the recurring sweep itself — useful e.g. while debugging, during a known provider outage, or ahead of a maintenance window.
 
 ## Approach
 
@@ -53,8 +54,22 @@ Validation mirrors the job handler's own: at least one of `--matchId`/`--matchId
 
 **Behavior:** posts the create-job request with `jobSchedule: "now"` (no `jobRepeatEvery`, so it's always a one-time run, never a duplicate recurring job) and the resolved `jobData`. Then polls the `agendaJobs` collection directly (the script already needs `MONGODB_URI` from `.env`, same as every other script in this repo) for the newest one-time job named `check-and-score-matches` (`repeatInterval` absent, distinguishing it from the recurring sweep) created after the request was sent, until it has a `lastFinishedAt`, and prints its result (`data.results`) to the terminal — so the operator sees the outcome (scored / no-result / skip-not-finished / not-found / error) without switching to the browser. Polls roughly once per second for up to 30 seconds; if it times out without finding a finished job, it says so and points at Agendash instead of hanging forever.
 
+## Pause/resume the recurring sweep (`scripts/toggle-sweep.ts`)
+
+Agendash's UI has no enable/disable action (checked its full source — only view, requeue, delete, create exist). The underlying `agenda` library does support this independently of Agendash: `agenda.disable(query)` / `agenda.enable(query)` set a `disabled: true/false` flag on matching job documents, and Agenda's own job-locking query (`find-and-lock-next-job.js:38`, `disabled: { $ne: true }`) genuinely excludes disabled jobs from being picked up — verified by reading the installed package, not assumed.
+
+This script talks to MongoDB/Agenda directly (like the repo's other maintenance scripts), not through Agendash's HTTP API — there's no HTTP surface for this action to call.
+
+**Usage:**
+```bash
+npx tsx scripts/toggle-sweep.ts --pause
+npx tsx scripts/toggle-sweep.ts --resume
+```
+
+**Behavior:** connects via `MONGODB_URI`, disables/enables jobs matching `{ name: "check-and-score-matches", repeatInterval: { $exists: true } }` — deliberately scoped to the recurring job only (via the `repeatInterval` field, which only recurring jobs have) so it never touches an in-flight one-time targeted run. Prints the number of jobs affected and the resulting `disabled` state for confirmation. Pausing does not cancel a run already in progress, only prevents the *next* scheduled tick from firing.
+
 ## Out of scope
 
-- No new HTTP endpoint on the automation service itself — both the browser UI and the CLI wrapper go through Agendash's existing create-job API.
-- No change to the recurring sweep's guardrails or schedule.
+- No new HTTP endpoint on the automation service itself — the browser UI and the CLI trigger wrapper go through Agendash's existing create-job API; the pause/resume script talks to Agenda/MongoDB directly since Agendash has no HTTP surface for that action.
+- No change to the recurring sweep's schedule/interval itself (still 30 minutes when active) — only whether it runs at all.
 - No UI changes to Agendash itself (it's a third-party package).
