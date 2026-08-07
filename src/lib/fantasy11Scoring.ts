@@ -7,6 +7,11 @@ export interface TeamRawScore {
   groupNames: string[];
   points: number;
   playerPoints: { playerName: string; points: number }[];
+  // Drafted players not found in the provider's scorecard -- carried through purely for the
+  // Match.scorecard snapshot (parity with the classic scoring path's "unmatched" display), never
+  // written to Fantasy11Points itself (rankAndSaveFantasy11Group's $set below is an explicit
+  // allowlist that doesn't include this field).
+  unmatched?: string[];
 }
 
 export interface RankedFantasy11Result extends TeamRawScore {
