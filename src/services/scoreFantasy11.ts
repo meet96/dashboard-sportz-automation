@@ -23,11 +23,11 @@ export interface Fantasy11ScoreResult {
 
 export async function scoreFantasy11Match(
   matchId: string,
-  opts: { cricbuzzMatchId?: string } = {}
+  opts: { cricbuzzMatchId?: string; allowIncomplete?: boolean } = {}
 ): Promise<Fantasy11ScoreResult> {
   const match = await Match.findById(matchId);
   if (!match) throw new Error("Match not found");
-  if (!match.isCompleted) throw new Error("Match is not marked as completed yet");
+  if (!match.isCompleted && !opts.allowIncomplete) throw new Error("Match is not marked as completed yet");
 
   const providedId = opts.cricbuzzMatchId?.trim();
   const cricbuzzMatchId = providedId || match.cricbuzzMatchId;
