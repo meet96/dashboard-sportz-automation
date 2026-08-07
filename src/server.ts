@@ -26,6 +26,12 @@ app.get("/health", (_req, res) => {
 // at REQUEST time rather than mounting Agendash(agenda) at module scope — the latter would
 // capture `undefined` permanently (or throw) during the boot window before startAgenda()
 // finishes. See the `agenda` export below for why it can't be a module-scope const.
+//
+// Agendash(agenda) builds an entire Express sub-app on every call (static file serving,
+// body-parser, API routes), so it's memoized here the first time `agenda` is truthy rather
+// than rebuilt per request — a single page load fans out into several requests otherwise.
+let agendashMiddleware: ReturnType<typeof Agendash> | undefined;
+
 app.use(
   "/admin/jobs",
   basicAuth({
@@ -37,7 +43,10 @@ app.use(
       res.status(503).json({ error: "Agenda not started yet" });
       return;
     }
-    return Agendash(agenda)(req, res, next);
+    if (!agendashMiddleware) {
+      agendashMiddleware = Agendash(agenda);
+    }
+    return agendashMiddleware(req, res, next);
   }
 );
 
