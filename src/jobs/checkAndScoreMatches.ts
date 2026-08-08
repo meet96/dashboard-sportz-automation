@@ -37,7 +37,8 @@ export function decideMatchAction(
   match: { date: Date; cricbuzzMatchId?: string | null },
   isFinished: boolean,
   nowMs: number,
-  isNoResult: boolean = false
+  isNoResult: boolean = false,
+  isLive: boolean = false
 ): MatchAction {
   const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
   const startMs = new Date(match.date).getTime();
@@ -48,10 +49,13 @@ export function decideMatchAction(
   // scoring an empty scorecard. Cricket only; football never sets isNoResult here. Checked first so
   // a genuinely no-result match is always resolved, even if it's also past the absolute cap.
   if (isNoResult) return "no-result";
-  // Wider absolute ceiling: applies whether or not the provider reports the match finished, so a
-  // finished-but-perpetually-failing match eventually stops burning API quota.
+  // Wider absolute ceiling: applies whether or not the provider reports the match finished or live,
+  // so a finished-but-perpetually-failing (or stuck-live) match eventually stops burning API quota.
   if (pastAbsoluteCap) return "stale";
   if (isFinished) return isFootball ? "score-football" : "score-cricket";
+  // Checked before the 12h soft-stale cap so a genuinely long-running live match (e.g. a Test)
+  // keeps getting live-scored past 12h, up to the 48h absolute cap above.
+  if (isLive) return "scored-live";
   if (pastStale) return "stale";
   return "skip-not-finished";
 }
@@ -237,7 +241,7 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
 
       let action = isTargetedRun
         ? decideForcedMatchAction(match, isFinished, isNoResult, isLive)
-        : decideMatchAction(match, isFinished, Date.now(), isNoResult);
+        : decideMatchAction(match, isFinished, Date.now(), isNoResult, isLive);
 
       // Live scoring (targeted runs only -- the recurring sweep has no live concept) is further
       // gated on a real Contest existing, checked only when actually needed (not on every

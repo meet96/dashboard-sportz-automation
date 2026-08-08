@@ -54,6 +54,35 @@ function main() {
     "no-result"
   );
 
+  // Finding (live scoring merge): decideMatchAction now also considers isLive, mirroring
+  // decideForcedMatchAction's live handling but still subject to the staleness caps.
+  assert.strictEqual(
+    decideMatchAction({ date: startedRecently, cricbuzzMatchId: "12345" }, false, now, false, true),
+    "scored-live"
+  );
+  assert.strictEqual(
+    decideMatchAction({ date: startedRecently, cricbuzzMatchId: "espn:999" }, false, now, false, true),
+    "scored-live"
+  );
+  // Finished still wins over live (authoritative outcome, matching decideForcedMatchAction's
+  // equivalent case below).
+  assert.strictEqual(
+    decideMatchAction({ date: startedRecently, cricbuzzMatchId: "12345" }, true, now, false, true),
+    "score-cricket"
+  );
+  // Live wins over the 12h soft-stale cap -- a long-running live match (e.g. a Test) keeps
+  // getting live-scored past 12h, unlike a genuinely stuck (not live, not finished) match.
+  const startedPastSoftCap = new Date(now - 13 * 60 * 60 * 1000); // 13h ago, past the 12h cap
+  assert.strictEqual(
+    decideMatchAction({ date: startedPastSoftCap, cricbuzzMatchId: "12345" }, false, now, false, true),
+    "scored-live"
+  );
+  // The 48h absolute cap still wins over live -- hard ceiling regardless of provider-reported state.
+  assert.strictEqual(
+    decideMatchAction({ date: startedWayLongAgo, cricbuzzMatchId: "12345" }, false, now, false, true),
+    "stale"
+  );
+
   // --- decideForcedMatchAction: no staleness concept at all, unlike decideMatchAction ---
   assert.strictEqual(
     decideForcedMatchAction({ cricbuzzMatchId: "12345" }, true, false),
