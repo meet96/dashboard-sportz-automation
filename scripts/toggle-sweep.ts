@@ -2,9 +2,8 @@ import "dotenv/config";
 import Agenda from "agenda";
 import { connectDB } from "../src/db";
 import { JOB_NAME as SWEEP_JOB_NAME } from "../src/jobs/checkAndScoreMatches";
-import { LIVE_JOB_NAME } from "../src/jobs/checkLiveMatches";
 
-const VALID_JOB_NAMES = [SWEEP_JOB_NAME, LIVE_JOB_NAME];
+const VALID_JOB_NAMES = [SWEEP_JOB_NAME];
 
 function parseArgs(argv: string[]): { mode: "--pause" | "--resume"; jobName: string } {
   const mode = argv[0];

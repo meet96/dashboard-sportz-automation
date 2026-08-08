@@ -5,7 +5,6 @@ import Agendash from "agendash";
 import basicAuth from "express-basic-auth";
 import { scoreRoutes } from "./routes/scoreRoutes";
 import { defineCheckAndScoreJob, JOB_NAME } from "./jobs/checkAndScoreMatches";
-import { defineCheckLiveMatchesJob, LIVE_JOB_NAME } from "./jobs/checkLiveMatches";
 import { connectDB } from "./db";
 
 export const app = express();
@@ -66,10 +65,9 @@ export async function startAgenda() {
   await connectDB();
   agenda = new Agenda({ db: { address: process.env.MONGODB_URI! } });
   defineCheckAndScoreJob(agenda);
-  defineCheckLiveMatchesJob(agenda);
   await agenda.start();
-  await agenda.every("30 minutes", JOB_NAME);
-  await agenda.every("10 minutes", LIVE_JOB_NAME);
+  const sweepIntervalMinutes = Number(process.env.SWEEP_INTERVAL_MINUTES) || 15;
+  await agenda.every(`${sweepIntervalMinutes} minutes`, JOB_NAME);
 }
 
 if (require.main === module) {
