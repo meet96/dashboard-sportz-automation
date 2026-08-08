@@ -7,9 +7,11 @@
  * Default weights: 1 pt/run, 5 pts/wicket, 2 pts/catch, 3 pts/stumping.
  *
  * Environment variables required for API calls:
- *   CRICBUZZ_API_KEY   — RapidAPI key
+ *   CRICBUZZ_API_KEYS  — comma-separated RapidAPI keys (round-robined; see cricbuzzClient.ts)
  *   CRICBUZZ_API_HOST  — optional, defaults to "cricbuzz-cricket.p.rapidapi.com"
  */
+
+import { fetchCricbuzz } from "./cricbuzzClient";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -483,28 +485,7 @@ export function calculateTeamPoints(
 export async function fetchCricbuzzScorecard(
   cricbuzzMatchId: string
 ): Promise<unknown[]> {
-  const apiKey = process.env.CRICBUZZ_API_KEY;
-  if (!apiKey) throw new Error("CRICBUZZ_API_KEY is not configured in environment");
-
-  const host =
-    process.env.CRICBUZZ_API_HOST ?? "cricbuzz-cricket.p.rapidapi.com";
-  const url = `https://${host}/mcenter/v1/${encodeURIComponent(cricbuzzMatchId)}/hscard`;
-
-  const res = await fetch(url, {
-    headers: {
-      "X-RapidAPI-Key": apiKey,
-      "X-RapidAPI-Host": host,
-    },
-    // Always fetch fresh — never cache match scorecards
-    cache: "no-store",
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Cricbuzz API error ${res.status}: ${body}`);
-  }
-
-  const data = (await res.json()) as Record<string, unknown>;
+  const data = await fetchCricbuzz(`/mcenter/v1/${encodeURIComponent(cricbuzzMatchId)}/hscard`);
 
   // API returns lowercase "scorecard" key
   const scoreCard = data.scoreCard ?? data.scorecard;
