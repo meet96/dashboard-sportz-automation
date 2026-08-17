@@ -34,6 +34,21 @@ const NOT_STARTED_STATES = new Set([
   "upcoming",
   "toss",
 ]);
+// Play has genuinely paused (multi-day cricket only) -- no new player data will appear until it
+// resumes, so the scorecard fetch that live-scoring would otherwise do every tick is pure wasted
+// API quota. Verified live during design (2026-08-17): a real ongoing Test returned state="Stumps"
+// (status="Day 3: Stumps"). The others are the same well-established Cricbuzz/cricket break
+// terminology, added on the same confidence basis "Abandon"/"Preview" originally were. Same
+// conservative philosophy as the sets above: an unrecognized state is never treated as a break, so
+// scoring is never silently skipped for an unmapped reason -- worst case it costs one wasted call.
+const BREAK_STATES = new Set([
+  "stumps",
+  "tea",
+  "lunch",
+  "innings break",
+  "rain delay",
+  "bad light",
+]);
 
 export interface CricbuzzMatchStatus {
   state: string;
@@ -46,6 +61,10 @@ export interface CricbuzzMatchStatus {
   // i.e. not terminal (isFinished) and not in the "hasn't started yet" set. Conservative default:
   // an unrecognized state is NOT live, matching this file's existing safe-default philosophy.
   isLive: boolean;
+  // True when isLive is also true but play is confirmed paused (stumps/tea/lunch/etc) -- the
+  // caller should skip the scorecard fetch + scoring call this tick without treating the match as
+  // any less live (no staleness cap should advance because of a break).
+  isOnBreak: boolean;
 }
 
 export async function fetchCricbuzzMatchStatus(matchId: string): Promise<CricbuzzMatchStatus> {
@@ -57,11 +76,13 @@ export async function fetchCricbuzzMatchStatus(matchId: string): Promise<Cricbuz
   const normalized = state.trim().toLowerCase();
   const isFinished = TERMINAL_STATES.has(normalized);
   const isNotStarted = NOT_STARTED_STATES.has(normalized);
+  const isLive = !isFinished && !isNotStarted;
   return {
     state,
     status: String(data.status ?? ""),
     isFinished,
     isNoResult: NO_RESULT_STATES.has(normalized),
-    isLive: !isFinished && !isNotStarted,
+    isLive,
+    isOnBreak: isLive && BREAK_STATES.has(normalized),
   };
 }

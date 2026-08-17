@@ -34,6 +34,7 @@ export type MatchAction =
   | "no-result"
   | "not-found"
   | "scored-live"
+  | "skip-on-break"
   | "skip-no-contest";
 
 // Pure decision function — no I/O — so it's unit-testable in isolation from the DB/network calls
@@ -43,7 +44,8 @@ export function decideMatchAction(
   isFinished: boolean,
   nowMs: number,
   isNoResult: boolean = false,
-  isLive: boolean = false
+  isLive: boolean = false,
+  isOnBreak: boolean = false
 ): MatchAction {
   const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
   const startMs = new Date(match.date).getTime();
@@ -61,7 +63,14 @@ export function decideMatchAction(
   if (isFinished) return isFootball ? "score-football" : "score-cricket";
   // Checked before the 12h soft-stale cap so a genuinely long-running live match (e.g. a Test)
   // keeps getting live-scored past 12h, up to the 48h absolute cap above.
-  if (isLive) return "scored-live";
+  if (isLive) {
+    // Play is confirmed paused (stumps/tea/lunch/etc) -- no new data will appear until it resumes,
+    // so skip the scorecard fetch + scoring call this tick rather than burning API quota for
+    // nothing. The status check itself (already done, cheap) still runs every tick so play
+    // resuming gets picked up on the very next poll.
+    if (isOnBreak) return "skip-on-break";
+    return "scored-live";
+  }
   if (pastStale) return "stale";
   return "skip-not-finished";
 }
@@ -72,14 +81,15 @@ export function decideForcedMatchAction(
   match: { cricbuzzMatchId?: string | null },
   isFinished: boolean,
   isNoResult: boolean = false,
-  isLive: boolean = false
+  isLive: boolean = false,
+  isOnBreak: boolean = false
 ): Exclude<MatchAction, "stale" | "not-found" | "skip-no-contest"> {
   if (isNoResult) return "no-result";
   if (isFinished) {
     const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
     return isFootball ? "score-football" : "score-cricket";
   }
-  if (isLive) return "scored-live";
+  if (isLive) return isOnBreak ? "skip-on-break" : "scored-live";
   return "skip-not-finished";
 }
 
@@ -227,6 +237,7 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
       let isFinished = false;
       let isNoResult = false;
       let isLive = false;
+      let isOnBreak = false;
 
       try {
         if (isFootball) {
@@ -239,6 +250,7 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
           isFinished = status.isFinished;
           isNoResult = status.isNoResult;
           isLive = status.isLive;
+          isOnBreak = status.isOnBreak;
         }
       } catch (err) {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action: "skip-not-finished", error: `status check failed: ${err instanceof Error ? err.message : String(err)}` });
@@ -246,8 +258,8 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
       }
 
       let action = isTargetedRun
-        ? decideForcedMatchAction(match, isFinished, isNoResult, isLive)
-        : decideMatchAction(match, isFinished, Date.now(), isNoResult, isLive);
+        ? decideForcedMatchAction(match, isFinished, isNoResult, isLive, isOnBreak)
+        : decideMatchAction(match, isFinished, Date.now(), isNoResult, isLive, isOnBreak);
 
       // Live scoring (targeted runs only -- the recurring sweep has no live concept) is further
       // gated on a real Contest existing, checked only when actually needed (not on every
@@ -266,7 +278,7 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
         continue;
       }
 
-      if (action === "skip-not-finished" || action === "stale" || action === "skip-no-contest") {
+      if (action === "skip-not-finished" || action === "stale" || action === "skip-no-contest" || action === "skip-on-break") {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action });
         continue;
       }
