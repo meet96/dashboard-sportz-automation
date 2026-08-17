@@ -14,12 +14,17 @@ import { hasActiveContestForMatch } from "../lib/hasActiveContestForMatch";
 export const JOB_NAME = "check-and-score-matches";
 const STALE_CAP_MS = 12 * 60 * 60 * 1000; // 12h past start, never reported finished -> stop auto-retrying
 // Absolute ceiling: regardless of the provider's reported status, stop retrying a match more than
-// 48h past its start time. This bounds the "finished but the scoring call throws every tick" case
-// (missing ScoringConfig, a name-matching bug, provider outage) which the 12h cap above does NOT
-// catch, because that cap only fires when a match is still *not finished*. Only applies to the
+// this long past its start time. This bounds the "finished but the scoring call throws every tick"
+// case (missing ScoringConfig, a name-matching bug, provider outage) which the 12h cap above does
+// NOT catch, because that cap only fires when a match is still *not finished*. Only applies to the
 // recurring sweep's own candidates -- a manually targeted run (Task 1's new capability) always
 // bypasses both caps, since a human explicitly asked for that match regardless of its age.
+// Test matches run up to 5 days -- the general 48h cap would give up live-scoring a Test on day 3,
+// so Test-named matches get a wider 7-day ceiling (5 days + slack for a delayed start/rain-extended
+// finish) instead.
 const ABSOLUTE_CAP_MS = 48 * 60 * 60 * 1000;
+const TEST_ABSOLUTE_CAP_MS = 7 * 24 * 60 * 60 * 1000;
+const isTestMatchName = (matchName: string) => /\btest\b/i.test(matchName);
 
 export type MatchAction =
   | "score-cricket"
@@ -34,7 +39,7 @@ export type MatchAction =
 // Pure decision function — no I/O — so it's unit-testable in isolation from the DB/network calls
 // that determine `isFinished`/`isNoResult`/`nowMs`. Used by the recurring sweep only.
 export function decideMatchAction(
-  match: { date: Date; cricbuzzMatchId?: string | null },
+  match: { date: Date; cricbuzzMatchId?: string | null; matchName?: string },
   isFinished: boolean,
   nowMs: number,
   isNoResult: boolean = false,
@@ -43,7 +48,8 @@ export function decideMatchAction(
   const isFootball = (match.cricbuzzMatchId ?? "").startsWith("espn:");
   const startMs = new Date(match.date).getTime();
   const pastStale = nowMs - startMs > STALE_CAP_MS;
-  const pastAbsoluteCap = nowMs - startMs > ABSOLUTE_CAP_MS;
+  const absoluteCapMs = isTestMatchName(match.matchName ?? "") ? TEST_ABSOLUTE_CAP_MS : ABSOLUTE_CAP_MS;
+  const pastAbsoluteCap = nowMs - startMs > absoluteCapMs;
 
   // Terminal-but-no-play (abandoned/cancelled/no-result/walkover): resolve as no-result instead of
   // scoring an empty scorecard. Cricket only; football never sets isNoResult here. Checked first so
