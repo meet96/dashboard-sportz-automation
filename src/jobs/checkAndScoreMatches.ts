@@ -26,6 +26,51 @@ const ABSOLUTE_CAP_MS = 48 * 60 * 60 * 1000;
 const TEST_ABSOLUTE_CAP_MS = 7 * 24 * 60 * 60 * 1000;
 const isTestMatchName = (matchName: string) => /\btest\b/i.test(matchName);
 
+// Start rechecking this far before the predicted next-day resume time, in case play starts a
+// bit early.
+const STUMPS_RECHECK_BUFFER_MS = 45 * 60 * 1000;
+// If we check in right at (or after) our predicted time and it's STILL stumps (delayed start,
+// overnight rain), push the estimate forward by this much rather than jumping a full day ahead
+// again -- keeps a late resumption from being missed for too long.
+const STUMPS_STILL_PAUSED_PUSHFORWARD_MS = 60 * 60 * 1000;
+// Not worth the complexity/risk of skipping for a gap shorter than this (e.g. stumps called very
+// late relative to the original start time) -- just poll normally in that case.
+const MIN_SKIP_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+// Pure decision function -- no I/O -- so it's unit-testable like decideMatchAction above.
+// Returns the new value to persist as Match.nextEligibleCheckAt: a future Date to start skipping
+// this match until, or null to clear any existing skip (poll normally next tick).
+export function computeNextEligibleCheckAt(
+  matchDate: Date,
+  nowMs: number,
+  currentNextEligible: Date | null,
+  state: string
+): Date | null {
+  const normalized = state.trim().toLowerCase();
+  if (normalized !== "stumps") return null;
+
+  if (currentNextEligible && currentNextEligible.getTime() > nowMs) {
+    // Already have a pending estimate that hasn't arrived yet -- don't recompute every tick
+    // (this match won't even reach here again until findCandidateMatches stops excluding it).
+    return currentNextEligible;
+  }
+
+  if (currentNextEligible && currentNextEligible.getTime() <= nowMs) {
+    // We checked in at our estimate and it's still stumps -- push forward modestly.
+    return new Date(nowMs + STUMPS_STILL_PAUSED_PUSHFORWARD_MS);
+  }
+
+  // First time seeing stumps this break -- estimate tomorrow's resumption at the same
+  // time-of-day the match originally started.
+  const estimate = new Date(nowMs);
+  estimate.setUTCHours(matchDate.getUTCHours(), matchDate.getUTCMinutes(), matchDate.getUTCSeconds(), 0);
+  if (estimate.getTime() <= nowMs) estimate.setUTCDate(estimate.getUTCDate() + 1);
+  const withBuffer = new Date(estimate.getTime() - STUMPS_RECHECK_BUFFER_MS);
+
+  if (withBuffer.getTime() - nowMs < MIN_SKIP_WINDOW_MS) return null;
+  return withBuffer;
+}
+
 export type MatchAction =
   | "score-cricket"
   | "score-football"
@@ -178,6 +223,9 @@ async function findCandidateMatches(): Promise<IMatch[]> {
     noResult: false,
     date: { $lte: new Date() },
     cricbuzzMatchId: { $exists: true, $ne: null },
+    // Skip matches sitting in a predicted overnight stumps gap entirely -- not even the
+    // lightweight status check, since nothing can change until roughly this time.
+    $or: [{ nextEligibleCheckAt: null }, { nextEligibleCheckAt: { $lte: new Date() } }],
   })
     .limit(50)
     .exec();
@@ -251,6 +299,21 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
           isNoResult = status.isNoResult;
           isLive = status.isLive;
           isOnBreak = status.isOnBreak;
+
+          // Update the overnight-skip prediction from this fresh status read, regardless of
+          // trigger (sweep or targeted) -- the next sweep tick relies on it being current.
+          const nextEligible = computeNextEligibleCheckAt(
+            match.date,
+            Date.now(),
+            match.nextEligibleCheckAt ?? null,
+            status.state
+          );
+          const currentMs = match.nextEligibleCheckAt ? match.nextEligibleCheckAt.getTime() : null;
+          const nextMs = nextEligible ? nextEligible.getTime() : null;
+          if (currentMs !== nextMs) {
+            match.nextEligibleCheckAt = nextEligible;
+            await Match.findByIdAndUpdate(match._id, { nextEligibleCheckAt: nextEligible });
+          }
         }
       } catch (err) {
         runSummary.push({ matchId: String(match._id), matchName: match.matchName, action: "skip-not-finished", error: `status check failed: ${err instanceof Error ? err.message : String(err)}` });

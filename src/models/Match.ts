@@ -49,6 +49,10 @@ export interface IMatch extends Document {
   leagueCodes: string[];
   cricbuzzMatchId?: string | null;
   scorecard?: IScorecard | null;
+  // Set while a Test match is at Stumps: the sweep skips this match entirely (not even a status
+  // check) until this time, instead of polling every 15 minutes through a predictable ~14-17h
+  // overnight gap where no new data can possibly appear. Null/unset means "poll normally".
+  nextEligibleCheckAt?: Date | null;
 }
 
 const ScorecardPlayerSchema = new Schema<IScorecardPlayer>({
@@ -104,6 +108,7 @@ const MatchSchema = new Schema<IMatch>(
     leagueCodes: { type: [String], default: [], index: true },
     cricbuzzMatchId: { type: String, default: null },
     scorecard: { type: ScorecardSchema, default: null },
+    nextEligibleCheckAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
