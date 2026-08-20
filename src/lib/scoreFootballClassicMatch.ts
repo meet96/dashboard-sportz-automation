@@ -271,20 +271,22 @@ export async function scoreFootballClassicMatch(
         awayCleanSheet
       );
 
-      // Hat-trick bonus: +hatTrickBonus for every player on this team who scored 3+ goals in
-      // the match, accumulated ($inc) rather than overwritten -- a user who's drafted the same
-      // hat-trick scorer on both of their team slots gets it twice, once per occurrence.
-      for (const pp of playerPoints) {
-        if (pp.goals >= 3) {
-          await ClassicBonus.findOneAndUpdate(
-            { userId: team.userId, matchId: match._id, leagueCode: league.code },
-            {
-              $inc: { bonusPoints: weights.hatTrickBonus },
-              $setOnInsert: { groupId: (team as { groupId?: unknown }).groupId ?? null, seriesId: (team as { seriesId?: unknown }).seriesId ?? null },
-            },
-            { upsert: true }
-          );
-        }
+      // Hat-trick bonus: hatTrickBonus per hat-trick occurrence this run (a player drafted into
+      // two of the user's team slots who both hit 3+ goals counts twice -- intentional). Written
+      // as a deterministic $set of the full recomputed total (like ClassicPoints above) rather
+      // than an accumulating $inc, so re-scoring the same live match repeatedly doesn't
+      // multiply the bonus. Only written when > 0 so users without a hat-trick this match keep
+      // whatever bonusPoints value they already had (e.g. a manual admin bonus).
+      const hatTrickOccurrences = playerPoints.filter((pp) => pp.goals >= 3).length;
+      if (hatTrickOccurrences > 0) {
+        await ClassicBonus.findOneAndUpdate(
+          { userId: team.userId, matchId: match._id, leagueCode: league.code },
+          {
+            $set: { bonusPoints: hatTrickOccurrences * weights.hatTrickBonus },
+            $setOnInsert: { groupId: (team as { groupId?: unknown }).groupId ?? null, seriesId: (team as { seriesId?: unknown }).seriesId ?? null },
+          },
+          { upsert: true }
+        );
       }
 
       const playerPointsByName = new Map(
@@ -407,12 +409,24 @@ export async function applyFootballMomBonus(
     (t.players ?? []).some((p) => normalizeFootballName(p) === normalizedTarget)
   );
 
+  const matchingUserIds = [...new Set(matchingTeams.map((t) => t.userId.toString()))];
+
+  // Correct a prior wrong pick / make re-applying the same pick a no-op: reset any existing
+  // MOM credit for this match+league that belongs to a user no longer holding the selected
+  // player, then $set (not $inc) the bonus for currently-matching users. This makes clicking
+  // "Apply MOM Bonus" twice for the same player idempotent, and switching to a different player
+  // correctly removes the old credit instead of leaving it stranded.
+  await ClassicMOM.updateMany(
+    { matchId: match._id, leagueCode, userId: { $nin: matchingUserIds } },
+    { $set: { momPoints: 0 } }
+  );
+
   const userIds = new Set<string>();
   for (const team of matchingTeams) {
     await ClassicMOM.findOneAndUpdate(
       { userId: team.userId, matchId: match._id, leagueCode },
       {
-        $inc: { momPoints: momBonus },
+        $set: { momPoints: momBonus },
         $setOnInsert: { groupId: (team as { groupId?: unknown }).groupId ?? null, seriesId: (team as { seriesId?: unknown }).seriesId ?? null },
       },
       { upsert: true }
