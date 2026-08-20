@@ -1,6 +1,7 @@
 import Match from "../models/Match";
 import ClassicTeam from "../models/ClassicTeam";
 import ClassicPoints from "../models/ClassicPoints";
+import ClassicBonus from "../models/ClassicBonus";
 import ScoringConfig from "../models/ScoringConfig";
 import LeagueCode from "../models/LeagueCode";
 import Series from "../models/Series";
@@ -22,6 +23,7 @@ interface FootballScoringWeights {
   goalkeeperCleanSheetPoints: number;
   defenderCleanSheetPoints: number;
   teamSize: number;
+  hatTrickBonus: number;
 }
 
 const DEFAULT_FOOTBALL_WEIGHTS: FootballScoringWeights = {
@@ -38,6 +40,7 @@ const DEFAULT_FOOTBALL_WEIGHTS: FootballScoringWeights = {
   goalkeeperCleanSheetPoints: 30,
   defenderCleanSheetPoints: 20,
   teamSize: 11,
+  hatTrickBonus: 50,
 };
 
 function getFootballRole(position: string): "goalkeeper" | "defender" | "midfielder" | "striker" {
@@ -95,7 +98,12 @@ function calculateFootballTeamPoints(
     let pts = 0;
     const role = getFootballRole(stats.position);
 
-    pts += stats.goals * goalPointsForRole(role, weights);
+    // First 3 goals at the normal position rate; every goal from the 4th onward at double
+    // that rate.
+    const goalRate = goalPointsForRole(role, weights);
+    const normalGoals = Math.min(stats.goals, 3);
+    const doubledGoals = Math.max(stats.goals - 3, 0);
+    pts += normalGoals * goalRate + doubledGoals * goalRate * 2;
     pts += stats.assists * assistPointsForRole(role, weights);
 
     let cleanSheetBonus = 0;
@@ -237,6 +245,7 @@ export async function scoreFootballClassicMatch(
           goalkeeperCleanSheetPoints: (cfg as any).goalkeeperCleanSheetPoints ?? DEFAULT_FOOTBALL_WEIGHTS.goalkeeperCleanSheetPoints,
           defenderCleanSheetPoints: (cfg as any).defenderCleanSheetPoints ?? DEFAULT_FOOTBALL_WEIGHTS.defenderCleanSheetPoints,
           teamSize: (cfg as any).teamSize ?? DEFAULT_FOOTBALL_WEIGHTS.teamSize,
+          hatTrickBonus: (cfg as any).hatTrickBonus ?? DEFAULT_FOOTBALL_WEIGHTS.hatTrickBonus,
         }
       : DEFAULT_FOOTBALL_WEIGHTS;
 
@@ -257,6 +266,22 @@ export async function scoreFootballClassicMatch(
         homeCleanSheet,
         awayCleanSheet
       );
+
+      // Hat-trick bonus: +hatTrickBonus for every player on this team who scored 3+ goals in
+      // the match, accumulated ($inc) rather than overwritten -- a user who's drafted the same
+      // hat-trick scorer on both of their team slots gets it twice, once per occurrence.
+      for (const pp of playerPoints) {
+        if (pp.goals >= 3) {
+          await ClassicBonus.findOneAndUpdate(
+            { userId: team.userId, matchId: match._id, leagueCode: league.code },
+            {
+              $inc: { bonusPoints: weights.hatTrickBonus },
+              $setOnInsert: { groupId: (team as { groupId?: unknown }).groupId ?? null, seriesId: (team as { seriesId?: unknown }).seriesId ?? null },
+            },
+            { upsert: true }
+          );
+        }
+      }
 
       const playerPointsByName = new Map(
         playerPoints.map((pp) => [normalizeFootballName(pp.playerName), pp])
