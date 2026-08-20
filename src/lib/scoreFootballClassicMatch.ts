@@ -2,6 +2,7 @@ import Match from "../models/Match";
 import ClassicTeam from "../models/ClassicTeam";
 import ClassicPoints from "../models/ClassicPoints";
 import ClassicBonus from "../models/ClassicBonus";
+import ClassicMOM from "../models/ClassicMOM";
 import ScoringConfig from "../models/ScoringConfig";
 import LeagueCode from "../models/LeagueCode";
 import Series from "../models/Series";
@@ -24,6 +25,7 @@ interface FootballScoringWeights {
   defenderCleanSheetPoints: number;
   teamSize: number;
   hatTrickBonus: number;
+  footballMomBonus: number;
 }
 
 const DEFAULT_FOOTBALL_WEIGHTS: FootballScoringWeights = {
@@ -41,6 +43,7 @@ const DEFAULT_FOOTBALL_WEIGHTS: FootballScoringWeights = {
   defenderCleanSheetPoints: 20,
   teamSize: 11,
   hatTrickBonus: 50,
+  footballMomBonus: 20,
 };
 
 function getFootballRole(position: string): "goalkeeper" | "defender" | "midfielder" | "striker" {
@@ -246,6 +249,7 @@ export async function scoreFootballClassicMatch(
           defenderCleanSheetPoints: (cfg as any).defenderCleanSheetPoints ?? DEFAULT_FOOTBALL_WEIGHTS.defenderCleanSheetPoints,
           teamSize: (cfg as any).teamSize ?? DEFAULT_FOOTBALL_WEIGHTS.teamSize,
           hatTrickBonus: (cfg as any).hatTrickBonus ?? DEFAULT_FOOTBALL_WEIGHTS.hatTrickBonus,
+          footballMomBonus: (cfg as any).footballMomBonus ?? DEFAULT_FOOTBALL_WEIGHTS.footballMomBonus,
         }
       : DEFAULT_FOOTBALL_WEIGHTS;
 
@@ -375,4 +379,47 @@ export async function scoreFootballClassicMatch(
       redCards: s.redCards,
     })),
   };
+}
+
+// Admin picks the real-world Man of the Match (ESPN has no MOTM field -- confirmed during
+// design, see the spec) -- this finds every Classic team in this league+series with that
+// player on its roster and auto-credits each affected user's ClassicMOM row, so the admin
+// doesn't have to look up or calculate who gets the bonus themselves.
+export async function applyFootballMomBonus(
+  matchId: string,
+  leagueCode: string,
+  playerName: string
+): Promise<{ affectedUsers: string[] }> {
+  const match = await Match.findById(matchId).lean();
+  if (!match) throw new Error("Match not found");
+
+  const cfg = await ScoringConfig.findOne({ leagueCode }).lean();
+  const momBonus = (cfg as { footballMomBonus?: number } | null)?.footballMomBonus ?? DEFAULT_FOOTBALL_WEIGHTS.footballMomBonus;
+
+  const seriesDoc = match.series?.length
+    ? await Series.findOne({ leagueCode, name: { $in: match.series } }).lean()
+    : null;
+  const seriesId = seriesDoc ? (seriesDoc as { _id: { toString(): string } })._id.toString() : null;
+
+  const normalizedTarget = normalizeFootballName(playerName);
+  const teams = await ClassicTeam.find({ leagueCode, seriesId }).lean();
+  const matchingTeams = teams.filter((t) =>
+    (t.players ?? []).some((p) => normalizeFootballName(p) === normalizedTarget)
+  );
+
+  const userIds = new Set<string>();
+  for (const team of matchingTeams) {
+    await ClassicMOM.findOneAndUpdate(
+      { userId: team.userId, matchId: match._id, leagueCode },
+      {
+        $inc: { momPoints: momBonus },
+        $setOnInsert: { groupId: (team as { groupId?: unknown }).groupId ?? null, seriesId: (team as { seriesId?: unknown }).seriesId ?? null },
+      },
+      { upsert: true }
+    );
+    userIds.add(team.userId.toString());
+  }
+
+  const userDocs = await User.find({ _id: { $in: [...userIds] } }).select("name").lean();
+  return { affectedUsers: userDocs.map((u) => u.name) };
 }
