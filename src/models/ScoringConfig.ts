@@ -35,6 +35,8 @@ export interface IScoringConfig extends Document {
   defenderCleanSheetPoints?: number;   // football: defender clean sheet bonus
   appearancePoints?: number;  // football: played minutes > 0
   fullMatchBonus?: number;    // football: 90+ mins bonus
+  hatTrickBonus?: number;     // football classic: bonus for scoring 3+ goals in a match
+  footballMomBonus?: number;  // football classic: bonus for the auto-applied Man of the Match
 }
 
 const ScoringConfigSchema = new Schema<IScoringConfig>(
@@ -79,6 +81,8 @@ const ScoringConfigSchema = new Schema<IScoringConfig>(
     defenderCleanSheetPoints:   { type: Number, default: 25 },
     appearancePoints:  { type: Number, default: 2 },
     fullMatchBonus:    { type: Number, default: 4 },
+    hatTrickBonus:     { type: Number, default: 50 },
+    footballMomBonus:  { type: Number, default: 20 },
   },
   { timestamps: true }
 );
