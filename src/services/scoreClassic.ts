@@ -35,7 +35,7 @@ export async function scoreClassicMatch(
 ): Promise<ClassicScoreResult> {
   const match = await Match.findById(matchId);
   if (!match) throw new Error("Match not found");
-  if (!match.isCompleted && !opts.allowIncomplete) throw new Error("Match is not marked as completed yet");
+  if (!match.isCompleted && !opts.allowIncomplete) throw new Error("Match is not marked as completed yet (automation-service)");
 
   const providedId = opts.cricbuzzMatchId?.trim();
   const cricbuzzMatchId = providedId || match.cricbuzzMatchId;

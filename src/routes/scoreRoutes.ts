@@ -17,7 +17,7 @@ function errorMessage(err: unknown): string {
 scoreRoutes.post("/matches/:id/score/classic", async (req, res) => {
   try {
     await connectDB();
-    const result = await scoreClassicMatch(req.params.id, { cricbuzzMatchId: req.body?.cricbuzzMatchId });
+    const result = await scoreClassicMatch(req.params.id, { cricbuzzMatchId: req.body?.cricbuzzMatchId, allowIncomplete: req.body?.allowIncomplete === true });
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(400).json({ error: errorMessage(err) });
@@ -27,7 +27,7 @@ scoreRoutes.post("/matches/:id/score/classic", async (req, res) => {
 scoreRoutes.post("/matches/:id/score/fantasy11", async (req, res) => {
   try {
     await connectDB();
-    const result = await scoreFantasy11Match(req.params.id, { cricbuzzMatchId: req.body?.cricbuzzMatchId });
+    const result = await scoreFantasy11Match(req.params.id, { cricbuzzMatchId: req.body?.cricbuzzMatchId, allowIncomplete: req.body?.allowIncomplete === true });
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(400).json({ error: errorMessage(err) });
@@ -41,6 +41,7 @@ scoreRoutes.post("/matches/:id/score/football", async (req, res) => {
       espnEventId: req.body?.espnEventId,
       espnUrl: req.body?.espnUrl,
       footballFixtureId: req.body?.footballFixtureId,
+      allowIncomplete: req.body?.allowIncomplete === true,
     });
     res.json({ success: true, ...result });
   } catch (err) {

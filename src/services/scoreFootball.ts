@@ -20,7 +20,7 @@ export async function scoreFootballMatch(
 ): Promise<FootballScoreResult> {
   const match = await Match.findById(matchId).lean();
   if (!match) throw new Error("Match not found");
-  if (!match.isCompleted && !opts.allowIncomplete) throw new Error("Match is not marked as completed yet");
+  if (!match.isCompleted && !opts.allowIncomplete) throw new Error("Match is not marked as completed yet (automation-service)");
 
   const eventRef = String(
     opts.espnEventId ?? opts.espnUrl ?? opts.footballFixtureId ?? match.cricbuzzMatchId ?? ""
