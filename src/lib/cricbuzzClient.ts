@@ -55,22 +55,25 @@ export async function fetchCricbuzzWithDeps(
 
     if (isQuotaError(res.status)) {
       state.exhausted.set(idx, month);
-      lastError = new Error(`Cricbuzz key #${idx} quota/subscription error ${res.status}`);
+      lastError = new Error(`${host} key #${idx} quota/subscription error ${res.status}`);
       continue;
     }
 
     // Non-quota HTTP error -- not a rotation trigger, fail immediately (retrying another key
     // wouldn't fix a real API/data problem, and would mask it).
     const body = await res.text();
-    throw new Error(`Cricbuzz API error ${res.status}: ${body}`);
+    throw new Error(`${host} API error ${res.status}: ${body}`);
   }
 
-  throw lastError ?? new Error("All Cricbuzz API keys exhausted or unavailable this month");
+  throw lastError ?? new Error(`All keys exhausted or unavailable this month for ${host}`);
 }
 
 const singletonState: CricbuzzRotationState = { cursor: 0, exhausted: new Map() };
 
-function parseKeys(): string[] {
+// Exported so other RapidAPI callers on this same key pool (e.g. lib/eplTransfers.ts) can reuse
+// fetchCricbuzzWithDeps against a different host with their own rotation state, instead of each
+// re-parsing CRICBUZZ_API_KEYS themselves.
+export function parseKeys(): string[] {
   return (process.env.CRICBUZZ_API_KEYS ?? "")
     .split(",")
     .map((k) => k.trim())

@@ -4,9 +4,17 @@
  * Premier League transfer detection via RapidAPI's "Free API Live Football Data" product
  * (free-api-live-football-data.p.rapidapi.com), a FotMob-backed feed.
  *
- * Deliberately a dedicated EPL_TRANSFERS_API_KEY, not the CRICBUZZ_API_KEYS rotation pool above --
- * RapidAPI subscriptions belong to a specific key, and only one key was ever confirmed subscribed
- * to this product. Reusing the rotation pool would risk silently hitting an unsubscribed key.
+ * Reuses the CRICBUZZ_API_KEYS rotation pool + fetchCricbuzzWithDeps (cricbuzzClient.ts) against
+ * this different host, with its own rotation state -- of the 4 pooled keys, only one is actually
+ * subscribed to this product (confirmed empirically: the other 3 return 403 "not subscribed"), but
+ * fetchCricbuzzWithDeps already treats any 403 as a rotate-to-next-key signal (it was written for
+ * Cricbuzz's quota errors, which share the same status code), so it transparently skips the
+ * unsubscribed keys and lands on the working one. A separate rotation state (not the Cricbuzz
+ * singleton) keeps this product's exhaustion tracking from cross-contaminating Cricbuzz's -- a key
+ * marked "exhausted" here for not being subscribed to this product says nothing about its Cricbuzz
+ * quota, and vice versa. Exhaustion is tracked per calendar month (see fetchCricbuzzWithDeps); this
+ * product's real quota is per-day, but at a couple of admin-triggered calls a year that mismatch
+ * never matters in practice.
  *
  * leagueid=47 was confirmed empirically (not documented) by inspecting a real response: every
  * `fromClub` returned for that id was a current Premier League club (Arsenal, Chelsea, Liverpool,
@@ -20,7 +28,11 @@
  * changes.
  */
 
+import { fetchCricbuzzWithDeps, parseKeys, type CricbuzzRotationState } from "./cricbuzzClient";
+
 const EPL_LEAGUE_ID = 47;
+const EPL_TRANSFERS_HOST = "free-api-live-football-data.p.rapidapi.com";
+const rotationState: CricbuzzRotationState = { cursor: 0, exhausted: new Map() };
 
 export interface EplTransfer {
   playerName: string;
@@ -41,20 +53,11 @@ interface RawTransfer {
 }
 
 export async function fetchEplTransfers(): Promise<EplTransfer[]> {
-  const apiKey = process.env.EPL_TRANSFERS_API_KEY;
-  if (!apiKey) throw new Error("EPL_TRANSFERS_API_KEY not set");
-
-  const host = process.env.EPL_TRANSFERS_API_HOST || "free-api-live-football-data.p.rapidapi.com";
-  const res = await fetch(`https://${host}/football-get-league-transfers?leagueid=${EPL_LEAGUE_ID}`, {
-    headers: { "x-rapidapi-key": apiKey, "x-rapidapi-host": host },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`EPL transfers API error ${res.status}: ${body.slice(0, 200)}`);
-  }
-
-  const data = (await res.json()) as { response?: { transfers?: RawTransfer[] } };
+  const data = (await fetchCricbuzzWithDeps(
+    `/football-get-league-transfers?leagueid=${EPL_LEAGUE_ID}`,
+    { fetchImpl: fetch, keys: parseKeys(), host: EPL_TRANSFERS_HOST, now: () => new Date() },
+    rotationState
+  )) as { response?: { transfers?: RawTransfer[] } };
   const transfers = data.response?.transfers ?? [];
 
   return transfers
