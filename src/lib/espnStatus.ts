@@ -7,10 +7,43 @@ export interface EspnMatchStatus {
   state: string;
   completed: boolean;
   isLive: boolean;
-  // Human-readable scoreline e.g. "Man City 2-1 Crystal Palace", or null if the same response
-  // didn't carry two competitors with parseable scores (shouldn't happen in practice, but the
-  // score is a display-only extra -- never worth failing the whole status check over).
-  score: string | null;
+  // Structured scoreline for the two competitors, or null if the response didn't carry two
+  // parseable competitors (shouldn't happen in practice, but this is a display-only extra --
+  // never worth failing the whole status check over).
+  score: EspnLiveScore | null;
+}
+
+export interface EspnTeamScore {
+  // ESPN's own short code (e.g. "MCI", "CRY") -- the same thing ESPN's UI shows, and what we want
+  // over a full team name.
+  code: string;
+  score: string;
+  // Crest URL, or null if ESPN didn't include one for this team.
+  logo: string | null;
+}
+
+export interface EspnLiveScore {
+  home: EspnTeamScore;
+  away: EspnTeamScore;
+}
+
+interface EspnCompetitor {
+  homeAway?: string;
+  score?: string;
+  team?: {
+    displayName?: string;
+    shortDisplayName?: string;
+    abbreviation?: string;
+    logo?: string;
+    logos?: Array<{ href?: string }>;
+  };
+}
+
+function toTeamScore(c: EspnCompetitor | undefined): EspnTeamScore | null {
+  if (!c || c.score === undefined) return null;
+  const code = c.team?.abbreviation ?? c.team?.shortDisplayName ?? c.team?.displayName ?? "";
+  const logo = c.team?.logo ?? c.team?.logos?.[0]?.href ?? null;
+  return { code, score: c.score, logo };
 }
 
 export async function fetchEspnMatchStatus(eventId: string): Promise<EspnMatchStatus> {
@@ -25,7 +58,7 @@ export async function fetchEspnMatchStatus(eventId: string): Promise<EspnMatchSt
     header?: {
       competitions?: Array<{
         status?: { type?: { state?: string; completed?: boolean } };
-        competitors?: Array<{ homeAway?: string; score?: string; team?: { displayName?: string; shortDisplayName?: string; abbreviation?: string } }>;
+        competitors?: EspnCompetitor[];
       }>;
     };
   };
@@ -34,20 +67,13 @@ export async function fetchEspnMatchStatus(eventId: string): Promise<EspnMatchSt
   if (!type) throw new Error("ESPN response missing header.competitions[0].status.type");
 
   const state = String(type.state ?? "");
-  const home = competition?.competitors?.find((c) => c.homeAway === "home");
-  const away = competition?.competitors?.find((c) => c.homeAway === "away");
-  // abbreviation is ESPN's own short code (e.g. "MCI", "CRY") -- the same thing ESPN's UI shows,
-  // and what we want here over a full team name.
-  const teamLabel = (c: typeof home) => c?.team?.abbreviation ?? c?.team?.shortDisplayName ?? c?.team?.displayName ?? "";
-  const score =
-    home?.score !== undefined && away?.score !== undefined
-      ? `${teamLabel(home)} ${home.score}-${away.score} ${teamLabel(away)}`.trim()
-      : null;
+  const home = toTeamScore(competition?.competitors?.find((c) => c.homeAway === "home"));
+  const away = toTeamScore(competition?.competitors?.find((c) => c.homeAway === "away"));
 
   return {
     state,
     completed: type.completed === true,
     isLive: state === "in",
-    score,
+    score: home && away ? { home, away } : null,
   };
 }

@@ -39,6 +39,17 @@ export interface IScorecard {
   teamResults: IScorecardTeamResult[];
 }
 
+export interface ILiveTeamScore {
+  code: string;
+  score: string;
+  logo?: string | null;
+}
+
+export interface ILiveScore {
+  home: ILiveTeamScore;
+  away: ILiveTeamScore;
+}
+
 export interface IMatch extends Document {
   matchName: string;
   series?: string[];
@@ -53,10 +64,10 @@ export interface IMatch extends Document {
   // check) until this time, instead of polling every 15 minutes through a predictable ~14-17h
   // overnight gap where no new data can possibly appear. Null/unset means "poll normally".
   nextEligibleCheckAt?: Date | null;
-  // Human-readable real-world scoreline (e.g. "Man City 2-1 Crystal Palace"), refreshed on every
-  // live-scoring tick from the same ESPN status call already made for isLive/isFinished. Football
-  // only for now -- cricket's equivalent (Cricbuzz matchScore) isn't wired up yet.
-  liveScore?: string | null;
+  // Real-world scoreline (codes + score + crest per side), refreshed on every live-scoring tick
+  // from the same ESPN status call already made for isLive/isFinished. Football only for now --
+  // cricket's equivalent (Cricbuzz matchScore) isn't wired up yet.
+  liveScore?: ILiveScore | null;
 }
 
 const ScorecardPlayerSchema = new Schema<IScorecardPlayer>({
@@ -101,6 +112,17 @@ const ScorecardSchema = new Schema<IScorecard>({
   teamResults: { type: [ScorecardTeamResultSchema], default: [] },
 }, { _id: false });
 
+const LiveTeamScoreSchema = new Schema<ILiveTeamScore>({
+  code: { type: String, required: true },
+  score: { type: String, required: true },
+  logo: { type: String, default: null },
+}, { _id: false });
+
+const LiveScoreSchema = new Schema<ILiveScore>({
+  home: { type: LiveTeamScoreSchema, required: true },
+  away: { type: LiveTeamScoreSchema, required: true },
+}, { _id: false });
+
 const MatchSchema = new Schema<IMatch>(
   {
     matchName: { type: String, required: true, trim: true },
@@ -113,7 +135,7 @@ const MatchSchema = new Schema<IMatch>(
     cricbuzzMatchId: { type: String, default: null },
     scorecard: { type: ScorecardSchema, default: null },
     nextEligibleCheckAt: { type: Date, default: null },
-    liveScore: { type: String, default: null },
+    liveScore: { type: LiveScoreSchema, default: null },
   },
   { timestamps: true }
 );

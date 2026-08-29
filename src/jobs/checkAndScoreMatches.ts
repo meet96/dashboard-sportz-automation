@@ -296,8 +296,9 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
 
           // Persist the scoreline from this same status call so the main app's contest card can
           // show it -- cheap (no extra API call), and kept current on every tick regardless of
-          // isLive so the final score also sticks around once the match finishes.
-          if ((match.liveScore ?? null) !== status.score) {
+          // isLive so the final score also sticks around once the match finishes. Structured
+          // objects never reference-equal each other, so compare by value instead.
+          if (JSON.stringify(match.liveScore ?? null) !== JSON.stringify(status.score)) {
             match.liveScore = status.score;
             await Match.findByIdAndUpdate(match._id, { liveScore: status.score });
           }
