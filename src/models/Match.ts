@@ -53,6 +53,10 @@ export interface IMatch extends Document {
   // check) until this time, instead of polling every 15 minutes through a predictable ~14-17h
   // overnight gap where no new data can possibly appear. Null/unset means "poll normally".
   nextEligibleCheckAt?: Date | null;
+  // Human-readable real-world scoreline (e.g. "Man City 2-1 Crystal Palace"), refreshed on every
+  // live-scoring tick from the same ESPN status call already made for isLive/isFinished. Football
+  // only for now -- cricket's equivalent (Cricbuzz matchScore) isn't wired up yet.
+  liveScore?: string | null;
 }
 
 const ScorecardPlayerSchema = new Schema<IScorecardPlayer>({
@@ -109,6 +113,7 @@ const MatchSchema = new Schema<IMatch>(
     cricbuzzMatchId: { type: String, default: null },
     scorecard: { type: ScorecardSchema, default: null },
     nextEligibleCheckAt: { type: Date, default: null },
+    liveScore: { type: String, default: null },
   },
   { timestamps: true }
 );

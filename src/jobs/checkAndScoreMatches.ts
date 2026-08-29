@@ -293,6 +293,14 @@ export function defineCheckAndScoreJob(agenda: import("agenda").default) {
           const status = await fetchEspnMatchStatus(espnId);
           isFinished = status.completed;
           isLive = status.isLive;
+
+          // Persist the scoreline from this same status call so the main app's contest card can
+          // show it -- cheap (no extra API call), and kept current on every tick regardless of
+          // isLive so the final score also sticks around once the match finishes.
+          if ((match.liveScore ?? null) !== status.score) {
+            match.liveScore = status.score;
+            await Match.findByIdAndUpdate(match._id, { liveScore: status.score });
+          }
         } else {
           const status = await fetchCricbuzzMatchStatus(String(match.cricbuzzMatchId));
           isFinished = status.isFinished;
