@@ -4,6 +4,7 @@ import Agenda from "agenda";
 import Agendash from "agendash";
 import basicAuth from "express-basic-auth";
 import { scoreRoutes } from "./routes/scoreRoutes";
+import { transferRoutes } from "./routes/transferRoutes";
 import { defineCheckAndScoreJob, JOB_NAME } from "./jobs/checkAndScoreMatches";
 import { connectDB } from "./db";
 
@@ -51,6 +52,7 @@ app.use(
 );
 
 app.use(scoreRoutes);
+app.use(transferRoutes);
 
 // Populated by startAgenda() below — undefined until then. Constructing Agenda at module scope
 // would connect to MongoDB as an import side-effect (Agenda's constructor connects synchronously
