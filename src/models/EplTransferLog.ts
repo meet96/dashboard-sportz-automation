@@ -15,9 +15,11 @@ export interface IEplTransferLog extends Document {
   fromClub: string;
   toClub: string;
   transferDate?: Date | null;
-  // "auto" -- checkEplTransfers matched it confidently and applied it unattended. "manual" -- an
-  // admin resolved a "needs review" entry themselves (see SeriesSquadTab.tsx's manual-apply flow).
-  source: "auto" | "manual";
+  // Always "auto" today -- checkEplTransfers writes every row unconditionally, whether or not it
+  // could confidently identify the player in the squad at check time (see checkEplTransfers.ts).
+  // Kept as a field (rather than dropped) so a future write path has somewhere to record its own
+  // provenance without a schema change.
+  source: "auto";
 }
 
 const EplTransferLogSchema = new Schema<IEplTransferLog>(
@@ -28,7 +30,7 @@ const EplTransferLogSchema = new Schema<IEplTransferLog>(
     fromClub: { type: String, required: true, trim: true },
     toClub: { type: String, required: true, trim: true },
     transferDate: { type: Date, default: null },
-    source: { type: String, enum: ["auto", "manual"], required: true },
+    source: { type: String, enum: ["auto"], required: true },
   },
   { timestamps: true }
 );

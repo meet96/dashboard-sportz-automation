@@ -2,22 +2,14 @@ import SeriesSquad from "../models/SeriesSquad";
 import EplTransferLog from "../models/EplTransferLog";
 import { fetchEplTransfers, resolveEplClub, playerNameMatchScore, TRANSFER_MATCH_CONFIDENT_THRESHOLD } from "../lib/eplTransfers";
 
-export interface AppliedTransfer {
+export interface LoggedTransfer {
   playerName: string;
   fromClub: string;
   toClub: string;
-}
-
-export interface NeedsReviewTransfer {
-  playerName: string;
-  fromClub: string;
-  toClub: string;
-  reason: string;
 }
 
 export interface CheckEplTransfersResult {
-  applied: AppliedTransfer[];
-  needsReview: NeedsReviewTransfer[];
+  logged: LoggedTransfer[];
 }
 
 // Admin-triggered only (see dashboard-sportz's SeriesSquadTab.tsx "Check for Transfers" button,
@@ -27,6 +19,15 @@ export interface CheckEplTransfersResult {
 // two year to year). Structured as a plain service function (this repo's existing convention --
 // see services/scoreFootball.ts etc.) so wiring it into an Agenda job later, if ever wanted, is a
 // small addition rather than a rewrite.
+//
+// Records every transfer relevant to this squad unconditionally -- there's no admin-facing
+// "review and manually resolve" step anymore. Whether a given transfer is actually a currently
+// pickable swap-in candidate is decided later, at swap time, by the mobile classic team editor
+// cross-referencing this log against the live squad by name (see ClassicTeamEditorScreen.tsx) --
+// a player it can't find under any club there just doesn't show up as an option. That's a strictly
+// better place to make that call than here: the live squad can change (re-pulls, further
+// transfers) after this log entry is written, and re-deciding "are they still real" at swap time
+// instead of freezing a verdict into the log keeps it correct without needing to re-run this check.
 export async function checkEplTransfers(seriesId: string, leagueCode: string): Promise<CheckEplTransfersResult> {
   const squad = await SeriesSquad.findOne({ seriesId, leagueCode });
   if (!squad) throw new Error("No squad data found for this series. Pull the squad first.");
@@ -41,12 +42,11 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
 
   // Every transfer this series has already logged, keyed by its natural (playerName, fromClub,
   // toClub) triple -- lets a re-run of this same check (the feed has no since-last-check cursor)
-  // skip a transfer it's already recorded, rather than reporting it as "applied" again every time.
+  // skip a transfer it's already recorded, rather than logging it again every time.
   const existingLogs = await EplTransferLog.find({ seriesId, leagueCode }).select("playerName fromClub toClub").lean();
   const loggedKeys = new Set(existingLogs.map((l) => `${l.playerName}|${l.fromClub}|${l.toClub}`));
 
-  const applied: AppliedTransfer[] = [];
-  const needsReview: NeedsReviewTransfer[] = [];
+  const logged: LoggedTransfer[] = [];
   let squadModified = false;
 
   for (const transfer of transfers) {
@@ -56,63 +56,44 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
     // Searches the WHOLE squad (every club, not just fromClub's own roster) for a confident name
     // match -- a squad re-pull can already reassign a player to their new club before this check
     // ever runs (an EPL-to-EPL move the source itself picked up), so scoping the search to just
-    // fromClub's current roster misses them entirely. A player genuinely not found anywhere in the
-    // squad -- most commonly because they left the tracked competition altogether and the source's
-    // fresh pull simply dropped them -- has nothing actionable to report, so it's skipped outright
-    // rather than padding out a "no confident match, check manually" list an admin can't act on.
+    // fromClub's current roster misses them. When exactly one confident match exists, the log uses
+    // that squad player's own exact spelling (guarantees the mobile app's name-based
+    // cross-reference against the live squad actually finds them); otherwise it falls back to the
+    // feed's own spelling -- there's nothing better, and no squad match means the mobile side will
+    // correctly treat them as not currently pickable regardless of exact spelling.
     const scored = squad.players
       .map((p) => ({ player: p, score: playerNameMatchScore(p.playerName, transfer.playerName) }))
       .filter((s) => s.score >= TRANSFER_MATCH_CONFIDENT_THRESHOLD);
+    const playerName = scored.length === 1 ? scored[0].player.playerName : transfer.playerName;
 
-    if (scored.length === 0) continue;
+    const key = `${playerName}|${canonicalFromClub}|${transfer.toClub}`;
+    if (loggedKeys.has(key)) continue;
 
-    if (scored.length > 1) {
-      needsReview.push({
-        playerName: transfer.playerName,
-        fromClub: canonicalFromClub,
-        toClub: transfer.toClub,
-        reason: `Ambiguous -- ${scored.length} squad players matched confidently.`,
-      });
-      continue;
-    }
+    await EplTransferLog.create({
+      seriesId,
+      leagueCode,
+      playerName,
+      fromClub: canonicalFromClub,
+      toClub: transfer.toClub,
+      transferDate: transfer.transferDate ? new Date(transfer.transferDate) : new Date(),
+      source: "auto",
+    });
+    loggedKeys.add(key);
+    logged.push({ playerName, fromClub: canonicalFromClub, toClub: transfer.toClub });
 
-    const { player } = scored[0];
-    let didSomething = false;
-
-    // Only flip the squad doc's own transferredOut/transferredTo when the pull hasn't already
-    // reflected the move -- if this player's current club already differs from canonicalFromClub
-    // (the Nicolas Jackson case: an EPL-to-EPL move a fresh pull already picked up), there's
-    // nothing to fix on the squad side, just a transfer worth logging for history/display.
-    const playerCurrentClub = resolveEplClub(player.teamName) ?? player.teamName.trim();
-    if (playerCurrentClub === canonicalFromClub && !player.transferredOut) {
-      player.transferredOut = true;
-      player.transferredTo = transfer.toClub;
-      player.transferredAt = transfer.transferDate ? new Date(transfer.transferDate) : new Date();
-      squadModified = true;
-      didSomething = true;
-    }
-
-    // Durable record, independent of squad.players[].transferredOut -- a later "Pull Squad" run
-    // replaces that whole array (silently resetting every flag), but this log is what the classic
-    // team editor's swap picker and "transferred this window" banner read from, so it needs to
-    // survive that.
-    const key = `${player.playerName}|${canonicalFromClub}|${transfer.toClub}`;
-    if (!loggedKeys.has(key)) {
-      await EplTransferLog.create({
-        seriesId,
-        leagueCode,
-        playerName: player.playerName,
-        fromClub: canonicalFromClub,
-        toClub: transfer.toClub,
-        transferDate: transfer.transferDate ? new Date(transfer.transferDate) : new Date(),
-        source: "auto",
-      });
-      loggedKeys.add(key);
-      didSomething = true;
-    }
-
-    if (didSomething) {
-      applied.push({ playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub });
+    // Best-effort side effect of logging, not a precondition for it: still flag the squad's own
+    // player record when there's exactly one confident match still sitting under the old club --
+    // keeps the reactive "your own pick needs a swap" detection (transferredInActive, mobile)
+    // working for the common case where a re-pull hasn't happened yet.
+    if (scored.length === 1) {
+      const { player } = scored[0];
+      const playerCurrentClub = resolveEplClub(player.teamName) ?? player.teamName.trim();
+      if (playerCurrentClub === canonicalFromClub && !player.transferredOut) {
+        player.transferredOut = true;
+        player.transferredTo = transfer.toClub;
+        player.transferredAt = transfer.transferDate ? new Date(transfer.transferDate) : new Date();
+        squadModified = true;
+      }
     }
   }
 
@@ -121,5 +102,5 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
     await squad.save();
   }
 
-  return { applied, needsReview };
+  return { logged };
 }
