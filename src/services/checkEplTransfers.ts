@@ -39,79 +39,84 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
     squad.players.map((p) => resolveEplClub(p.teamName) ?? p.teamName.trim()).filter(Boolean)
   );
 
+  // Every transfer this series has already logged, keyed by its natural (playerName, fromClub,
+  // toClub) triple -- lets a re-run of this same check (the feed has no since-last-check cursor)
+  // skip a transfer it's already recorded, rather than reporting it as "applied" again every time.
+  const existingLogs = await EplTransferLog.find({ seriesId, leagueCode }).select("playerName fromClub toClub").lean();
+  const loggedKeys = new Set(existingLogs.map((l) => `${l.playerName}|${l.fromClub}|${l.toClub}`));
+
   const applied: AppliedTransfer[] = [];
   const needsReview: NeedsReviewTransfer[] = [];
+  let squadModified = false;
 
   for (const transfer of transfers) {
     const canonicalFromClub = resolveEplClub(transfer.fromClub);
     if (!canonicalFromClub || !clubsInSquad.has(canonicalFromClub)) continue;
 
-    const clubPlayers = squad.players.filter((p) => {
-      const playerClub = resolveEplClub(p.teamName) ?? p.teamName.trim();
-      return playerClub === canonicalFromClub;
-    });
-
-    // The feed returns the whole window's history every time (no since-last-check cursor), so a
-    // transfer already applied in an earlier run of this same check shows up again here. Matching
-    // against every club player (not just not-yet-flagged ones) first lets us recognize that case
-    // and skip it silently, rather than falling through to candidates-minus-flagged below and
-    // misreporting an already-handled transfer as "no confident match, check manually".
-    const alreadyHandled = clubPlayers.some(
-      (p) => p.transferredOut && playerNameMatchScore(p.playerName, transfer.playerName) >= TRANSFER_MATCH_CONFIDENT_THRESHOLD
-    );
-    if (alreadyHandled) continue;
-
-    const candidates = clubPlayers.filter((p) => !p.transferredOut);
-
-    const scored = candidates
+    // Searches the WHOLE squad (every club, not just fromClub's own roster) for a confident name
+    // match -- a squad re-pull can already reassign a player to their new club before this check
+    // ever runs (an EPL-to-EPL move the source itself picked up), so scoping the search to just
+    // fromClub's current roster misses them entirely. A player genuinely not found anywhere in the
+    // squad -- most commonly because they left the tracked competition altogether and the source's
+    // fresh pull simply dropped them -- has nothing actionable to report, so it's skipped outright
+    // rather than padding out a "no confident match, check manually" list an admin can't act on.
+    const scored = squad.players
       .map((p) => ({ player: p, score: playerNameMatchScore(p.playerName, transfer.playerName) }))
       .filter((s) => s.score >= TRANSFER_MATCH_CONFIDENT_THRESHOLD);
 
-    if (scored.length === 1) {
-      const { player } = scored[0];
-      player.transferredOut = true;
-      player.transferredTo = transfer.toClub;
-      player.transferredAt = transfer.transferDate ? new Date(transfer.transferDate) : new Date();
-      applied.push({ playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub });
-      // Durable record, independent of squad.players[].transferredOut -- a later "Pull Squad" run
-      // replaces that whole array (silently resetting every flag), but this log is what the
-      // classic team editor's swap picker and "transferred this window" banner read from, so it
-      // needs to survive that. Upserted on the natural key rather than a fresh insert so
-      // re-running this same check (the feed has no since-last-check cursor -- see alreadyHandled
-      // above) can't produce duplicate rows for the same transfer.
-      await EplTransferLog.findOneAndUpdate(
-        { seriesId, leagueCode, playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub },
-        {
-          seriesId,
-          leagueCode,
-          playerName: player.playerName,
-          fromClub: canonicalFromClub,
-          toClub: transfer.toClub,
-          transferDate: transfer.transferDate ? new Date(transfer.transferDate) : new Date(),
-          source: "auto",
-        },
-        { upsert: true }
-      );
-    } else if (scored.length === 0 && candidates.length > 0) {
-      // A transfer left this club, and we have players drafted from it, but couldn't confidently
-      // match a name -- surface it rather than silently missing a real transfer.
-      needsReview.push({
-        playerName: transfer.playerName,
-        fromClub: canonicalFromClub,
-        toClub: transfer.toClub,
-        reason: "No confident name match in this squad -- check manually.",
-      });
-    } else if (scored.length > 1) {
+    if (scored.length === 0) continue;
+
+    if (scored.length > 1) {
       needsReview.push({
         playerName: transfer.playerName,
         fromClub: canonicalFromClub,
         toClub: transfer.toClub,
         reason: `Ambiguous -- ${scored.length} squad players matched confidently.`,
       });
+      continue;
+    }
+
+    const { player } = scored[0];
+    let didSomething = false;
+
+    // Only flip the squad doc's own transferredOut/transferredTo when the pull hasn't already
+    // reflected the move -- if this player's current club already differs from canonicalFromClub
+    // (the Nicolas Jackson case: an EPL-to-EPL move a fresh pull already picked up), there's
+    // nothing to fix on the squad side, just a transfer worth logging for history/display.
+    const playerCurrentClub = resolveEplClub(player.teamName) ?? player.teamName.trim();
+    if (playerCurrentClub === canonicalFromClub && !player.transferredOut) {
+      player.transferredOut = true;
+      player.transferredTo = transfer.toClub;
+      player.transferredAt = transfer.transferDate ? new Date(transfer.transferDate) : new Date();
+      squadModified = true;
+      didSomething = true;
+    }
+
+    // Durable record, independent of squad.players[].transferredOut -- a later "Pull Squad" run
+    // replaces that whole array (silently resetting every flag), but this log is what the classic
+    // team editor's swap picker and "transferred this window" banner read from, so it needs to
+    // survive that.
+    const key = `${player.playerName}|${canonicalFromClub}|${transfer.toClub}`;
+    if (!loggedKeys.has(key)) {
+      await EplTransferLog.create({
+        seriesId,
+        leagueCode,
+        playerName: player.playerName,
+        fromClub: canonicalFromClub,
+        toClub: transfer.toClub,
+        transferDate: transfer.transferDate ? new Date(transfer.transferDate) : new Date(),
+        source: "auto",
+      });
+      loggedKeys.add(key);
+      didSomething = true;
+    }
+
+    if (didSomething) {
+      applied.push({ playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub });
     }
   }
 
-  if (applied.length > 0) {
+  if (squadModified) {
     squad.markModified("players");
     await squad.save();
   }
