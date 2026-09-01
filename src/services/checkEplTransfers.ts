@@ -45,11 +45,22 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
     const canonicalFromClub = resolveEplClub(transfer.fromClub);
     if (!canonicalFromClub || !clubsInSquad.has(canonicalFromClub)) continue;
 
-    const candidates = squad.players.filter((p) => {
-      if (p.transferredOut) return false; // already flagged, don't re-process
+    const clubPlayers = squad.players.filter((p) => {
       const playerClub = resolveEplClub(p.teamName) ?? p.teamName.trim();
       return playerClub === canonicalFromClub;
     });
+
+    // The feed returns the whole window's history every time (no since-last-check cursor), so a
+    // transfer already applied in an earlier run of this same check shows up again here. Matching
+    // against every club player (not just not-yet-flagged ones) first lets us recognize that case
+    // and skip it silently, rather than falling through to candidates-minus-flagged below and
+    // misreporting an already-handled transfer as "no confident match, check manually".
+    const alreadyHandled = clubPlayers.some(
+      (p) => p.transferredOut && playerNameMatchScore(p.playerName, transfer.playerName) >= TRANSFER_MATCH_CONFIDENT_THRESHOLD
+    );
+    if (alreadyHandled) continue;
+
+    const candidates = clubPlayers.filter((p) => !p.transferredOut);
 
     const scored = candidates
       .map((p) => ({ player: p, score: playerNameMatchScore(p.playerName, transfer.playerName) }))
