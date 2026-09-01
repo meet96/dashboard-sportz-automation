@@ -1,4 +1,5 @@
 import SeriesSquad from "../models/SeriesSquad";
+import EplTransferLog from "../models/EplTransferLog";
 import { fetchEplTransfers, resolveEplClub, playerNameMatchScore, TRANSFER_MATCH_CONFIDENT_THRESHOLD } from "../lib/eplTransfers";
 
 export interface AppliedTransfer {
@@ -72,6 +73,25 @@ export async function checkEplTransfers(seriesId: string, leagueCode: string): P
       player.transferredTo = transfer.toClub;
       player.transferredAt = transfer.transferDate ? new Date(transfer.transferDate) : new Date();
       applied.push({ playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub });
+      // Durable record, independent of squad.players[].transferredOut -- a later "Pull Squad" run
+      // replaces that whole array (silently resetting every flag), but this log is what the
+      // classic team editor's swap picker and "transferred this window" banner read from, so it
+      // needs to survive that. Upserted on the natural key rather than a fresh insert so
+      // re-running this same check (the feed has no since-last-check cursor -- see alreadyHandled
+      // above) can't produce duplicate rows for the same transfer.
+      await EplTransferLog.findOneAndUpdate(
+        { seriesId, leagueCode, playerName: player.playerName, fromClub: canonicalFromClub, toClub: transfer.toClub },
+        {
+          seriesId,
+          leagueCode,
+          playerName: player.playerName,
+          fromClub: canonicalFromClub,
+          toClub: transfer.toClub,
+          transferDate: transfer.transferDate ? new Date(transfer.transferDate) : new Date(),
+          source: "auto",
+        },
+        { upsert: true }
+      );
     } else if (scored.length === 0 && candidates.length > 0) {
       // A transfer left this club, and we have players drafted from it, but couldn't confidently
       // match a name -- surface it rather than silently missing a real transfer.
